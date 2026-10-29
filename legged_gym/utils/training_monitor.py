@@ -143,16 +143,7 @@ class TrainingMonitor:
         env = self.env
         qpos = env.sim.qpos[index].copy()
         qvel = env.sim.qvel[index].copy()
-        w, x, y, z = qpos[3:7]
-        yaw = np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
-        linear = env.base_lin_vel_w[index]
-        velocity = np.array(
-            [
-                np.cos(yaw) * linear[0] + np.sin(yaw) * linear[1],
-                -np.sin(yaw) * linear[0] + np.cos(yaw) * linear[1],
-                qvel[5],
-            ]
-        )
+        velocity = np.array([*env.base_lin_vel[index, :2], env.base_ang_vel[index, 2]])
         return {
             "env": index,
             "time": time.monotonic() - self._start,

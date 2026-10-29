@@ -109,6 +109,26 @@ class LeggedRobotCfg(BaseConfig):
 class LeggedRobotCfgPPO(BaseConfig):
     seed = 42
 
+    class evaluation:
+        num_envs = 16
+        seeds = [0, 1, 2]
+        warmup_s = 2.0
+        duration_s = 5.0
+        settling_hold_s = 0.5
+        velocity_tolerance = [0.1, 0.1, 0.15]  # X/Y m/s, yaw rad/s; all axes must settle.
+        # Scenario: (warmup command, measured command), both in X/Y/yaw order.
+        commands = {
+            "stand": ([0, 0, 0], [0, 0, 0]),
+            "forward": ([0, 0, 0], [0.5, 0, 0]),
+            "backward": ([0, 0, 0], [-0.5, 0, 0]),
+            "left": ([0, 0, 0], [0, 0.3, 0]),
+            "right": ([0, 0, 0], [0, -0.3, 0]),
+            "turn_left": ([0, 0, 0], [0, 0, 0.5]),
+            "turn_right": ([0, 0, 0], [0, 0, -0.5]),
+            "combined": ([0, 0, 0], [0.5, 0.3, 0.5]),
+            "stop": ([0.5, 0, 0], [0, 0, 0]),
+        }
+
     class viewer:
         enabled = True
         history_points = 500

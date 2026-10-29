@@ -95,7 +95,7 @@ def get_load_path(root, load_run=-1, checkpoint=-1):
     return str(path)
 
 
-def get_args(argv=None, *, default_rl_device="auto"):
+def get_args(argv=None, *, default_rl_device="auto", playback=False):
     parser = argparse.ArgumentParser(description="MuJoCo batch CPU physics + rsl-rl PPO (MPS/CUDA/CPU)")
     parser.add_argument(
         "--task",
@@ -142,7 +142,11 @@ def get_args(argv=None, *, default_rl_device="auto"):
     parser.add_argument("--checkpoint", type=int, default=-1)
     parser.add_argument("--checkpoint_path", "--checkpoint-path", help="Explicit model_*.pt file")
     parser.add_argument("--headless", action="store_true", help="Disable the training web monitor or playback viewer")
-    parser.add_argument("--steps", type=int, default=1000, help="Playback control steps")
+    parser.add_argument(
+        "--steps",
+        type=int,
+        help="Control steps: playback defaults to 1000; evaluation overrides each command's duration",
+    )
     parser.add_argument(
         "--velocity",
         type=float,
@@ -150,6 +154,22 @@ def get_args(argv=None, *, default_rl_device="auto"):
         metavar=("VX", "VY", "WZ"),
         help="Fixed playback command; otherwise sample the full task range",
     )
+    if playback:
+        parser.add_argument(
+            "--evaluate", action="store_true", help="Run the fixed command evaluation suite without a viewer"
+        )
+        parser.add_argument(
+            "--eval_seeds",
+            "--eval-seeds",
+            nargs="+",
+            type=int,
+            help="Evaluation seeds (default: evaluation config; --seed selects one)",
+        )
+        parser.add_argument(
+            "--eval_output",
+            "--eval-output",
+            help="Directory for evaluation JSON/CSV (default: checkpoint directory/evaluations)",
+        )
     args = parser.parse_args(argv)
     for name in ("num_envs", "max_iterations", "torch_threads", "steps"):
         value = getattr(args, name)
@@ -161,6 +181,16 @@ def get_args(argv=None, *, default_rl_device="auto"):
             parser.error(f"{name} must be finite and positive")
     if args.num_threads is not None and args.num_threads < 0:
         parser.error("num_threads must be nonnegative")
+    if playback:
+        if not args.evaluate and (args.eval_seeds is not None or args.eval_output is not None):
+            parser.error("eval_seeds and eval_output require --evaluate")
+        if args.evaluate and args.velocity is not None:
+            parser.error("--evaluate uses the configured command suite; do not combine it with --velocity")
+        if args.evaluate and args.seed is not None and args.eval_seeds is not None:
+            parser.error("Choose --seed or --eval_seeds")
+        seeds = args.eval_seeds if args.eval_seeds is not None else [args.seed] if args.seed is not None else []
+        if args.evaluate and (any(seed < 0 for seed in seeds) or len(set(seeds)) != len(seeds)):
+            parser.error("Evaluation seeds must be distinct and nonnegative")
     try:
         args.rl_device = resolve_rl_device(args.rl_device)
     except (RuntimeError, ValueError) as error:

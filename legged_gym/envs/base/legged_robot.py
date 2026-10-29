@@ -79,7 +79,14 @@ class LeggedRobot(VecEnv):
         self._diagnostic_steps = np.zeros(self.num_envs, dtype=int)
         self._diagnostic_sums = {
             key: np.zeros(self.num_envs)
-            for key in ("command_forward", "velocity_forward", "forward_error", "single_support", "double_support")
+            for key in (
+                [
+                    f"{metric}_{axis}"
+                    for axis in ("x", "y", "yaw")
+                    for metric in ("command", "velocity", "tracking_mae", "tracking_rmse")
+                ]
+                + [f"contact_feet_{count}_fraction" for count in range(feet_shape[1] + 1)]
+            )
         }
         self._liftoff_count = np.zeros(self.num_envs)
         self.obs_buf = None
@@ -105,20 +112,22 @@ class LeggedRobot(VecEnv):
     def get_observations(self):
         return self.obs_buf
 
+    def get_tracking_velocity(self):
+        """Root-link body-frame X/Y velocity and yaw rate, as used by tracking rewards."""
+        return np.column_stack((self.base_lin_vel[:, :2], self.base_ang_vel[:, 2]))
+
     def _update_diagnostics(self):
-        w, x, y, z = self.base_quat.T
-        yaw = np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
-        forward = np.cos(yaw) * self.base_lin_vel_w[:, 0] + np.sin(yaw) * self.base_lin_vel_w[:, 1]
+        # Retain the terminal sample for evaluation before step() auto-resets it.
+        self.last_tracking_velocity = self.get_tracking_velocity()
+        error = self.last_tracking_velocity - self.commands
+        for index, axis in enumerate(("x", "y", "yaw")):
+            self._diagnostic_sums[f"command_{axis}"] += self.commands[:, index]
+            self._diagnostic_sums[f"velocity_{axis}"] += self.last_tracking_velocity[:, index]
+            self._diagnostic_sums[f"tracking_mae_{axis}"] += np.abs(error[:, index])
+            self._diagnostic_sums[f"tracking_rmse_{axis}"] += np.square(error[:, index])
         contacts = self._feet_contact.sum(axis=1)
-        values = {
-            "command_forward": self.commands[:, 0],
-            "velocity_forward": forward,
-            "forward_error": np.abs(forward - self.commands[:, 0]),
-            "single_support": contacts == 1,
-            "double_support": contacts == 2,
-        }
-        for key, value in values.items():
-            self._diagnostic_sums[key] += value
+        for count in range(self._feet_contact.shape[1] + 1):
+            self._diagnostic_sums[f"contact_feet_{count}_fraction"] += contacts == count
         self._diagnostic_steps += 1
 
     def _episode_metrics(self, ids):
@@ -130,10 +139,13 @@ class LeggedRobot(VecEnv):
             },
             "Episode/length_s": float(self.episode_length_buf.numpy()[ids].mean() * self.dt),
             "Episode/time_out_fraction": float(self.time_out_buf[ids].mean()),
+            "Episode/failure_fraction": float(self.terminated_buf[ids].mean()),
             "Episode/tilt_failure_fraction": float(self._tilt_failure[ids].mean()),
-            "Episode/height_failure_fraction": float(self._height_failure[ids].mean()),
+            "Episode/contact_failure_fraction": float(self._contact_failure[ids].mean()),
             **{
-                f"Diagnostics/{key}": float((values[ids] / steps).mean())
+                f"Diagnostics/{key}": float(
+                    (np.sqrt(values[ids] / steps) if key.startswith("tracking_rmse_") else values[ids] / steps).mean()
+                )
                 for key, values in self._diagnostic_sums.items()
             },
             "Diagnostics/foot_liftoffs_per_second": float((self._liftoff_count[ids] / (steps * self.dt)).mean()),
@@ -336,14 +348,13 @@ class LeggedRobot(VecEnv):
 
     def check_termination(self):
         self._tilt_failure = np.arccos(np.clip(-self.projected_gravity[:, 2], -1, 1)) > self.cfg.termination.max_tilt
-        self._height_failure = np.zeros(self.num_envs, dtype=bool)
         threshold = self.cfg.termination.illegal_contact_threshold
-        contact = (
+        self._contact_failure = (
             np.linalg.norm(self._collision_history, axis=-1).max(axis=(0, 2)) > threshold
             if threshold is not None
             else np.zeros(self.num_envs, dtype=bool)
         )
-        self.terminated_buf = self._tilt_failure | contact
+        self.terminated_buf = self._tilt_failure | self._contact_failure
         self.time_out_buf = self.episode_length_buf.numpy() >= self.max_episode_length
         self.reset_buf = self.terminated_buf | self.time_out_buf
 

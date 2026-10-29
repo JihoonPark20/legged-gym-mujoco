@@ -25,7 +25,7 @@ python -m legged_gym.scripts.train --task g1
 
 The default task is `go2`. Both tasks use **4096 environments, 10 CPU workers and 10001 iterations**. Adjust these with `--num_envs`, `--num_threads` and `--max_iterations`. Use `--rl_device mps`, `cuda`, `cuda:N` or `cpu` to select a learner explicitly; physics always runs on the CPU.
 
-Open **http://127.0.0.1:8080** for the Viser training monitor. It shows the robot, commanded/actual forward and yaw velocities, and training progress. The actual URL is printed at startup. Use `--headless` to disable the monitor and **Ctrl-C** to stop training.
+Open **http://127.0.0.1:8080** for the Viser training monitor. It shows the robot, commanded/actual X/Y/yaw velocities, and training progress. The actual URL is printed at startup. Use `--headless` to disable the monitor and **Ctrl-C** to stop training.
 
 ## Checkpoints and resuming
 
@@ -47,6 +47,14 @@ mjpython -m legged_gym.scripts.play --task g1 --velocity 0.5 0 0
 ```
 
 On Linux, replace `mjpython` with `python`. Use `--task go2` for Go2. Playback loads the latest checkpoint by default; `--checkpoint_path PATH` selects another. `--velocity VX VY WZ` sets forward/lateral velocity (m/s) and yaw rate (rad/s). For playback without a viewer, use `python` with `--headless --steps 500`.
+
+Evaluate fixed commands across multiple seeds without a viewer:
+
+```bash
+python -m legged_gym.scripts.play --task go2 --evaluate --checkpoint_path PATH
+```
+
+JSON/CSV reports are saved beside the checkpoint under `evaluations/`: X/Y/yaw MAE/RMSE, failure rates and settling times. Defaults: 16 environments, seeds 0/1/2, 2 s warmup and 5 s measurement per command. Use the same settings when comparing checkpoints. Override with `--eval_seeds 0 1 2`, `--num_envs`, `--steps` (measurement steps per command) or `--eval_output DIR`; the protocol is configured in `LeggedRobotCfgPPO.evaluation`. Training logs also include per-axis tracking errors and termination causes.
 
 ## Configuration and references
 
