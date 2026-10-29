@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Based on legged_gym task_registry, Copyright (c) 2021 ETH Zurich, Nikita Rudin.
-"""Task construction and the rsl-rl 5.5 runner configuration boundary."""
+"""Task construction and the rsl-rl runner configuration boundary."""
 
 import json
 from copy import deepcopy
 from datetime import datetime
+from importlib.metadata import version
 from pathlib import Path
 
 import torch
@@ -12,7 +13,7 @@ from rsl_rl.runners import OnPolicyRunner
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
 
-from .mujoco_helpers import (
+from .helpers import (
     class_to_dict,
     get_args,
     get_load_path,
@@ -26,13 +27,12 @@ from .mujoco_helpers import (
 def policy_contract(env):
     """Fields that must match when a saved policy is applied to this task."""
     contract = {
-        "version": 1,
+        "version": 2,
         "robot": env.cfg.asset.file,
+        "asset_sha256": env.sim.asset_digest,
         "joint_names": env.dof_names,
         "policy_obs": env.num_obs,
         "critic_obs": env.num_privileged_obs,
-        "history_length": env.cfg.env.history_length,
-        "history_order": "term_oldest_first",
         "sim_dt": env.cfg.sim.dt,
         "decimation": env.cfg.control.decimation,
         "action_scale": env.cfg.control.action_scale,
@@ -41,26 +41,25 @@ def policy_contract(env):
         "kp": env.p_gains.tolist(),
         "kd": env.d_gains.tolist(),
         "effort_limits": env.torque_limits.tolist(),
-        "torque_speed_curve": env.cfg.control.torque_speed_curve,
         "armature": env.cfg.control.armature,
         "frictionloss": env.cfg.control.frictionloss,
+        "foot_sites": env.cfg.asset.foot_sites,
+        "solver_settings": {
+            key: getattr(env.cfg.sim, key)
+            for key in ("iterations", "cone", "ls_iterations", "tolerance", "ls_tolerance", "ccd_iterations")
+        },
     }
-    if env.custom_origins or env.cfg.terrain.measure_heights:
-        contract["terrain"] = {
-            "mesh_type": env.cfg.terrain.mesh_type,
-            "actor_height_scan": env.cfg.observations.actor_height_scan,
-            "critic_height_scan": env.cfg.observations.critic_height_scan,
-            "measured_points_x": list(env.cfg.terrain.measured_points_x),
-            "measured_points_y": list(env.cfg.terrain.measured_points_y),
-            "height_observation_offset": env.cfg.terrain.height_observation_offset,
-            "height_observation_scale": env.cfg.terrain.height_observation_scale,
-            "height_interpolation": "mujoco_triangles",
+    if hasattr(env.cfg.asset, "self_collisions"):
+        contract["contact_settings"] = {
+            key: getattr(env.cfg.asset, key)
+            for key in ("self_collisions", "foot_contact_bodies", "foot_geoms", "foot_solimp", "reward_body")
         }
     return contract
 
 
 def runner_config(cfg):
     policy = class_to_dict(cfg.policy)
+    algorithm = class_to_dict(cfg.algorithm)
     return {
         "seed": cfg.seed,
         "num_steps_per_env": cfg.runner.num_steps_per_env,
@@ -70,9 +69,10 @@ def runner_config(cfg):
             "class_name": "rsl_rl.models:MLPModel",
             "hidden_dims": policy["actor_hidden_dims"],
             "activation": policy["activation"],
-            "obs_normalization": False,
+            "obs_normalization": policy["obs_normalization"],
             "distribution_cfg": {
                 "class_name": "rsl_rl.modules:GaussianDistribution",
+                "std_type": "scalar",
                 "init_std": policy["init_noise_std"],
             },
         },
@@ -80,9 +80,14 @@ def runner_config(cfg):
             "class_name": "rsl_rl.models:MLPModel",
             "hidden_dims": policy["critic_hidden_dims"],
             "activation": policy["activation"],
-            "obs_normalization": False,
+            "obs_normalization": policy["obs_normalization"],
         },
-        "algorithm": {"class_name": "rsl_rl.algorithms:PPO", **class_to_dict(cfg.algorithm)},
+        "algorithm": {
+            "class_name": "rsl_rl.algorithms:PPO",
+            "rnd_cfg": None,
+            "symmetry_cfg": None,
+            **algorithm,
+        },
         "logger": "tensorboard",
         "check_for_nan": True,
     }
@@ -103,7 +108,9 @@ class LeggedOnPolicyRunner(OnPolicyRunner):
     def load(self, path, load_cfg=None, strict=True, map_location=None, *, restore_env=True):
         checkpoint = torch.load(path, weights_only=False, map_location="cpu")
         metadata = (checkpoint.get("infos") or {}).get("legged_gym")
-        if metadata is None or metadata.get("contract") != policy_contract(self.env):
+        if metadata is None or any(
+            metadata.get("contract", {}).get(key) != value for key, value in policy_contract(self.env).items()
+        ):
             raise ValueError("Checkpoint policy contract does not match this robot/configuration")
         del checkpoint
         # Load on CPU, then let model/optimizer state_dict loading place tensors
@@ -146,12 +153,10 @@ class TaskRegistry:
             if snapshot_path.is_file():
                 snapshot = json.loads(snapshot_path.read_text())
                 if snapshot["env"]["asset"]["file"] != env_cfg.asset.file:
-                    raise ValueError("Checkpoint snapshot belongs to a different robot")
-                saved_terrain = snapshot["env"].get("terrain", {}).get("mesh_type", "plane")
-                if saved_terrain != env_cfg.terrain.mesh_type:
-                    raise ValueError("Checkpoint snapshot belongs to a different terrain task (flat/rough)")
-                update_class_from_dict(env_cfg, snapshot["env"])
-                update_class_from_dict(train_cfg, snapshot["train"])
+                    raise ValueError("Checkpoint snapshot belongs to a different robot/configuration")
+                update_class_from_dict(env_cfg, snapshot["env"], strict=False)
+                update_class_from_dict(train_cfg, snapshot["train"], strict=False)
+                train_cfg.runner.experiment_name = name
         if args is not None:
             update_cfg_from_args(env_cfg, train_cfg, args)
         env_cfg.seed = train_cfg.seed
@@ -174,6 +179,10 @@ class TaskRegistry:
         return env, env_cfg
 
     def make_alg_runner(self, env, name=None, args=None, train_cfg=None, log_root="default"):
+        if version("rsl-rl-lib") != "5.0.1":
+            raise RuntimeError(
+                "This project requires rsl-rl-lib 5.0.1. Install dependencies with: python -m pip install -e ."
+            )
         args = get_args() if args is None else args
         if train_cfg is None:
             if name is None:
@@ -213,6 +222,13 @@ class TaskRegistry:
             if path is None:
                 raise ValueError("Resolve the resume checkpoint through get_cfgs before constructing the runner")
             runner.load(path, restore_env=not getattr(args, "play", False))
+            # Loading Adam restores its saved LR. An explicit CLI override must
+            # update both Adam and PPO's adaptive scheduler after that restore.
+            learning_rate = getattr(args, "learning_rate", None)
+            if learning_rate is not None:
+                runner.alg.learning_rate = learning_rate
+                for group in runner.alg.optimizer.param_groups:
+                    group["lr"] = learning_rate
         return runner, train_cfg
 
 

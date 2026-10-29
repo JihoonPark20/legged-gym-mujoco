@@ -1,0 +1,192 @@
+{
+  "repository": "https://github.com/unitreerobotics/unitree_rl_mjlab",
+  "revision": "1425b15f73bd4095f0df53709d7c389c3eb9e790",
+  "mjlab_version": "1.2.0",
+  "reference_mujoco_warp": "3.5.0",
+  "reference_rsl_rl": "5.0.1",
+  "asset_source": "src/assets/robots/unitree_g1/xmls/g1.xml",
+  "source_sha256": "56539bc76eadb05dd439c47de94df52130ea8fa243d08bdddd9cbc32dd4c78a0",
+  "asset_sha256": "df4b9629dc7a3df8851d0b9fba601bb1518561bcb3184e835a10b8300b7fc4b6",
+  "meshes": [
+    {
+      "source": "pelvis.STL",
+      "file": "meshes/pelvis.STL",
+      "git_blob_sha1": "691a779b9c9f4c97f48eaa9edf9eb336ca3b4411"
+    },
+    {
+      "source": "pelvis_contour_link.STL",
+      "file": "meshes/pelvis_contour_link.STL",
+      "git_blob_sha1": "42434339abf5a0a3816f890389e3e61af3b1e03c"
+    },
+    {
+      "source": "left_hip_pitch_link.STL",
+      "file": "meshes/left_hip_pitch_link.STL",
+      "git_blob_sha1": "5b751c767ecf03b29c707b19f1faf5367e8d33d2"
+    },
+    {
+      "source": "left_hip_roll_link.STL",
+      "file": "meshes/left_hip_roll_link.STL",
+      "git_blob_sha1": "778437ffe61731915fa4cb7cf2390e9cbe738c43"
+    },
+    {
+      "source": "left_hip_yaw_link.STL",
+      "file": "meshes/left_hip_yaw_link.STL",
+      "git_blob_sha1": "383093ab96ed3a099ab79f5d6ed144fc0b7067a9"
+    },
+    {
+      "source": "left_knee_link.STL",
+      "file": "meshes/left_knee_link.STL",
+      "git_blob_sha1": "f2e98e54e8f1980eb62ad25c7a838044c23bbadf"
+    },
+    {
+      "source": "left_ankle_pitch_link.STL",
+      "file": "meshes/left_ankle_pitch_link.STL",
+      "git_blob_sha1": "69de8490184afc698f633e34bb74e65351bd4689"
+    },
+    {
+      "source": "left_ankle_roll_link.STL",
+      "file": "meshes/left_ankle_roll_link.STL",
+      "git_blob_sha1": "8864e9f98103190883d1ba027aba5469925f2bca"
+    },
+    {
+      "source": "right_hip_pitch_link.STL",
+      "file": "meshes/right_hip_pitch_link.STL",
+      "git_blob_sha1": "998a0a0f5c248b217cf82c5088d6d365d9654ecd"
+    },
+    {
+      "source": "right_hip_roll_link.STL",
+      "file": "meshes/right_hip_roll_link.STL",
+      "git_blob_sha1": "47b2eebdd36c7289679eebb9583c65a15514e194"
+    },
+    {
+      "source": "right_hip_yaw_link.STL",
+      "file": "meshes/right_hip_yaw_link.STL",
+      "git_blob_sha1": "371856427c7cc31ae7463c83f00ef6652c72d672"
+    },
+    {
+      "source": "right_knee_link.STL",
+      "file": "meshes/right_knee_link.STL",
+      "git_blob_sha1": "76d21a3d81e4e34520c5d6b3f28d7e43c1874364"
+    },
+    {
+      "source": "right_ankle_pitch_link.STL",
+      "file": "meshes/right_ankle_pitch_link.STL",
+      "git_blob_sha1": "e77d8a2fe1e5d56fac049833d254d6ffa4f6b350"
+    },
+    {
+      "source": "right_ankle_roll_link.STL",
+      "file": "meshes/right_ankle_roll_link.STL",
+      "git_blob_sha1": "d4261dd7ccf39dd9c54cad37c1982f1d50e6fccc"
+    },
+    {
+      "source": "waist_yaw_link_rev_1_0.STL",
+      "file": "meshes/mjlab_waist_yaw_link_rev_1_0.STL",
+      "git_blob_sha1": "0fabb63d37627cb77f64c5d2a46cf25d4acc66fc"
+    },
+    {
+      "source": "waist_roll_link_rev_1_0.STL",
+      "file": "meshes/mjlab_waist_roll_link_rev_1_0.STL",
+      "git_blob_sha1": "a64f330c592582dc31cdf38f4d08cfff06681c5f"
+    },
+    {
+      "source": "torso_link_rev_1_0.STL",
+      "file": "meshes/mjlab_torso_link_rev_1_0.STL",
+      "git_blob_sha1": "8a759a709750ad97e1f372db0ebbff246daedcc1"
+    },
+    {
+      "source": "logo_link.STL",
+      "file": "meshes/logo_link.STL",
+      "git_blob_sha1": "e9792098504b64b359fbffa983373e5e6fa1b50a"
+    },
+    {
+      "source": "head_link.STL",
+      "file": "meshes/mjlab_head_link.STL",
+      "git_blob_sha1": "2ee5fba15de3ccd4c31774bc7a66de7aeefab770"
+    },
+    {
+      "source": "left_shoulder_pitch_link.STL",
+      "file": "meshes/left_shoulder_pitch_link.STL",
+      "git_blob_sha1": "e698311fb12d3f22f018b668c40dab667c39b8d3"
+    },
+    {
+      "source": "left_shoulder_roll_link.STL",
+      "file": "meshes/left_shoulder_roll_link.STL",
+      "git_blob_sha1": "80bca84aca41137f8270fb35e263dcc5d9658e43"
+    },
+    {
+      "source": "left_shoulder_yaw_link.STL",
+      "file": "meshes/left_shoulder_yaw_link.STL",
+      "git_blob_sha1": "281e699055ffafe094f52a440547eb4b64f83bfa"
+    },
+    {
+      "source": "left_elbow_link.STL",
+      "file": "meshes/left_elbow_link.STL",
+      "git_blob_sha1": "1a96d99ba469960173129084ab6dd3bf8a732a71"
+    },
+    {
+      "source": "left_wrist_roll_link.STL",
+      "file": "meshes/left_wrist_roll_link.STL",
+      "git_blob_sha1": "f3c263a7ab3fc1e902bf2513064d4bc666c6b59f"
+    },
+    {
+      "source": "left_wrist_pitch_link.STL",
+      "file": "meshes/left_wrist_pitch_link.STL",
+      "git_blob_sha1": "82cc224a8e41251d879502f9809e31d0988ec7f9"
+    },
+    {
+      "source": "left_wrist_yaw_link.STL",
+      "file": "meshes/left_wrist_yaw_link.STL",
+      "git_blob_sha1": "31be4fd45fa18987b35b3386fdce2ce98c798774"
+    },
+    {
+      "source": "left_rubber_hand.STL",
+      "file": "meshes/left_rubber_hand.STL",
+      "git_blob_sha1": "c44830f1fd519ee28750cad04d7d0adb209c265f"
+    },
+    {
+      "source": "right_shoulder_pitch_link.STL",
+      "file": "meshes/right_shoulder_pitch_link.STL",
+      "git_blob_sha1": "3f5b4ed47ade68e83f617ef3fd65cb810e9b0e07"
+    },
+    {
+      "source": "right_shoulder_roll_link.STL",
+      "file": "meshes/right_shoulder_roll_link.STL",
+      "git_blob_sha1": "179d61753d48b3a55165b81ded2c14e84deb81c2"
+    },
+    {
+      "source": "right_shoulder_yaw_link.STL",
+      "file": "meshes/right_shoulder_yaw_link.STL",
+      "git_blob_sha1": "2ba6076a8853edac5e3e17cffd2c256318e88d92"
+    },
+    {
+      "source": "right_elbow_link.STL",
+      "file": "meshes/right_elbow_link.STL",
+      "git_blob_sha1": "f259e3812efb9985d6463c04d3e8a4b53793a699"
+    },
+    {
+      "source": "right_wrist_roll_link.STL",
+      "file": "meshes/right_wrist_roll_link.STL",
+      "git_blob_sha1": "26868d2282b7e38c2ba40e00968d2c92c421fbd2"
+    },
+    {
+      "source": "right_wrist_pitch_link.STL",
+      "file": "meshes/right_wrist_pitch_link.STL",
+      "git_blob_sha1": "da194543c40df9d492abb0553c06cc614a78caae"
+    },
+    {
+      "source": "right_wrist_yaw_link.STL",
+      "file": "meshes/right_wrist_yaw_link.STL",
+      "git_blob_sha1": "d788902867014c5984e6029fce822508579f73dc"
+    },
+    {
+      "source": "right_rubber_hand.STL",
+      "file": "meshes/right_rubber_hand.STL",
+      "git_blob_sha1": "0aacffbb8168f0bb588f8cba3f37f9e2c6e0421a"
+    }
+  ],
+  "notes": [
+    "Only mesh directory/filenames and XML formatting changed; source physical parameters and sensor definitions are preserved.",
+    "Identical existing meshes are reused. Distinct meshes use mjlab_ prefixed filenames without replacing earlier assets.",
+    "CPU MuJoCo 3.17 double precision replaces Warp 3.5 float precision."
+  ]
+}

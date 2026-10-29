@@ -2,13 +2,6 @@
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
-[tool.pytest.ini_options]
-testpaths = ["legged_gym/tests"]
-markers = [
-    "mps: exercises PPO on Apple Metal (skips if unavailable)",
-    "cuda: exercises PPO on NVIDIA CUDA (skips if unavailable)",
-]
-
 [tool.ruff]
 line-length = 120
 

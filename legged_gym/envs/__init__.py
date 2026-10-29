@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
-# 
+#
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
 #
@@ -28,16 +28,11 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
-from .base.legged_robot import LeggedRobot
-from .go2.go2_flat_config import Go2FlatCfg, Go2FlatCfgPPO
-from .g1.g1_config import G1FlatCfg, G1FlatCfgPPO
-from .go2.go2_rough_config import Go2RoughCfg, Go2RoughCfgPPO
-from .g1.g1_rough_config import G1RoughCfg, G1RoughCfgPPO
 from legged_gym.utils.task_registry import task_registry
 
-for name in ("go2", "go2_flat"):
-    task_registry.register(name, LeggedRobot, Go2FlatCfg(), Go2FlatCfgPPO())
-for name in ("g1", "g1_29dof"):
-    task_registry.register(name, LeggedRobot, G1FlatCfg(), G1FlatCfgPPO())
-task_registry.register("go2_rough", LeggedRobot, Go2RoughCfg(), Go2RoughCfgPPO())
-task_registry.register("g1_rough", LeggedRobot, G1RoughCfg(), G1RoughCfgPPO())
+from .base.legged_robot import LeggedRobot
+from .g1.g1_config import G1Cfg, G1CfgPPO
+from .go2.go2_config import Go2Cfg, Go2CfgPPO
+
+task_registry.register("go2", LeggedRobot, Go2Cfg(), Go2CfgPPO())
+task_registry.register("g1", LeggedRobot, G1Cfg(), G1CfgPPO())

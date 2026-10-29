@@ -1,6 +1,7 @@
 """Configuration, CLI and device helpers for the MuJoCo training path."""
 
 import argparse
+import math
 import random
 from pathlib import Path
 
@@ -22,13 +23,15 @@ def class_to_dict(obj):
     }
 
 
-def update_class_from_dict(obj, values):
+def update_class_from_dict(obj, values, *, strict=True):
     for key, value in values.items():
         if not hasattr(obj, key):
+            if not strict:
+                continue
             raise ValueError(f"Unknown configuration field: {key}")
         target = getattr(obj, key)
         if isinstance(value, dict) and hasattr(target, "__dict__"):
-            update_class_from_dict(target, value)
+            update_class_from_dict(target, value, strict=strict)
         else:
             setattr(obj, key, value)
 
@@ -94,12 +97,11 @@ def get_load_path(root, load_run=-1, checkpoint=-1):
 
 def get_args(argv=None, *, default_rl_device="auto"):
     parser = argparse.ArgumentParser(description="MuJoCo batch CPU physics + rsl-rl PPO (MPS/CUDA/CPU)")
-    parser.add_argument("--task", default="go2", choices=["go2", "go2_flat", "g1", "g1_29dof", "go2_rough", "g1_rough"])
     parser.add_argument(
-        "--terrain_level", "--terrain-level", type=int, help="Fixed initial terrain level for playback (0 is easiest)"
-    )
-    parser.add_argument(
-        "--terrain_column", "--terrain-column", type=int, help="Terrain type column to display during rough playback"
+        "--task",
+        default="go2",
+        choices=["go2", "g1"],
+        help="Locomotion task (default: go2)",
     )
     parser.add_argument(
         "--rl_device",
@@ -120,13 +122,26 @@ def get_args(argv=None, *, default_rl_device="auto"):
     )
     parser.add_argument("--seed", type=int)
     parser.add_argument("--max_iterations", "--max-iterations", type=int)
+    parser.add_argument(
+        "--max_grad_norm",
+        "--max-grad-norm",
+        type=float,
+        help="PPO gradient norm limit",
+    )
+    parser.add_argument("--desired_kl", "--desired-kl", type=float, help="Target KL for PPO's adaptive learning rate")
+    parser.add_argument(
+        "--learning_rate",
+        "--learning-rate",
+        type=float,
+        help="Initial learning rate; also overrides the resumed optimizer LR",
+    )
     parser.add_argument("--experiment_name")
     parser.add_argument("--run_name")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--load_run", default="-1")
     parser.add_argument("--checkpoint", type=int, default=-1)
     parser.add_argument("--checkpoint_path", "--checkpoint-path", help="Explicit model_*.pt file")
-    parser.add_argument("--headless", action="store_true", help="Playback without a viewer")
+    parser.add_argument("--headless", action="store_true", help="Disable the training web monitor or playback viewer")
     parser.add_argument("--steps", type=int, default=1000, help="Playback control steps")
     parser.add_argument(
         "--velocity",
@@ -140,12 +155,12 @@ def get_args(argv=None, *, default_rl_device="auto"):
         value = getattr(args, name)
         if value is not None and value <= 0:
             parser.error(f"{name} must be positive")
+    for name in ("max_grad_norm", "desired_kl", "learning_rate"):
+        value = getattr(args, name)
+        if value is not None and (not math.isfinite(value) or value <= 0):
+            parser.error(f"{name} must be finite and positive")
     if args.num_threads is not None and args.num_threads < 0:
         parser.error("num_threads must be nonnegative")
-    if args.terrain_level is not None and args.terrain_level < 0:
-        parser.error("terrain_level must be nonnegative")
-    if args.terrain_column is not None and args.terrain_column < 0:
-        parser.error("terrain_column must be nonnegative")
     try:
         args.rl_device = resolve_rl_device(args.rl_device)
     except (RuntimeError, ValueError) as error:
@@ -164,6 +179,10 @@ def update_cfg_from_args(env_cfg, train_cfg, args):
         if getattr(args, "num_threads", None) is not None:
             env_cfg.sim.nthread = args.num_threads
     if train_cfg is not None:
+        for key in ("max_grad_norm", "desired_kl", "learning_rate"):
+            value = getattr(args, key, None)
+            if value is not None:
+                setattr(train_cfg.algorithm, key, value)
         for key in ("max_iterations", "experiment_name", "run_name"):
             value = getattr(args, key, None)
             if value is not None:

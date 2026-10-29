@@ -1,5 +1,10 @@
-"""Official MuJoCo 3.17 batch API; no per-environment Python stepping."""
+"""Native CPU equivalent of Unitree's mjlab 1.2 model construction.
 
+Sensors use the same primary/secondary contact
+ordering as mjlab, and step() leaves derived state at the pre-integration stage.
+"""
+
+import hashlib
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -9,7 +14,6 @@ import numpy as np
 from mujoco import batch
 
 from legged_gym import LEGGED_GYM_RESOURCES_DIR
-from legged_gym.utils.terrain import Terrain
 
 
 def joint_parameters(names, patterns, default=None):
@@ -25,67 +29,141 @@ def joint_parameters(names, patterns, default=None):
     return values
 
 
-def load_model(cfg, terrain=None):
-    """Add task terrain and native fixed-size sensors to the official Unitree MJCF."""
-    terrain = Terrain(cfg.terrain, cfg.env.num_envs, cfg.seed) if terrain is None else terrain
+def foot_geom_names(cfg):
+    return getattr(cfg.asset, "foot_geoms", [f"{name}_foot_collision" for name in cfg.asset.foot_sites])
+
+
+def load_model(cfg):
     path = Path(LEGGED_GYM_RESOURCES_DIR) / "robots" / cfg.asset.file
     root = ET.parse(path).getroot()
     compiler = root.find("compiler")
     compiler.set("meshdir", str(path.parent / compiler.get("meshdir", "")))
-    compiler.set("fusestatic", "false")
-    option = root.find("option")
-    if option is None:
-        option = ET.SubElement(root, "option")
-    option.attrib.update(
-        timestep=str(cfg.sim.dt), integrator="implicitfast", iterations=str(cfg.sim.iterations), cone="elliptic"
+    ET.SubElement(
+        root,
+        "option",
+        timestep=str(cfg.sim.dt),
+        integrator="implicitfast",
+        cone=cfg.sim.cone,
+        solver="Newton",
+        jacobian="auto",
+        impratio="1",
+        iterations=str(cfg.sim.iterations),
+        ls_iterations=str(cfg.sim.ls_iterations),
+        tolerance=str(cfg.sim.tolerance),
+        ls_tolerance=str(cfg.sim.ls_tolerance),
+        ccd_iterations=str(cfg.sim.ccd_iterations),
+        gravity="0 0 -9.81",
     )
-    # Remove the vendor's DDS/noisy sensors and poses; the task owns policy I/O.
-    for tag in ("sensor", "actuator", "keyframe"):
-        for element in root.findall(tag):
-            root.remove(element)
     world = root.find("worldbody")
-    terrain.add_to_mjcf(root)
+    ET.SubElement(
+        world,
+        "geom",
+        name="floor",
+        type="plane",
+        size="0 0 0.1",
+        friction="1 0.005 0.0001",
+        rgba="0.25 0.3 0.35 1",
+        condim="3",
+    )
     ET.SubElement(world, "light", name="task_light", pos="0 0 4", dir="0 0 -1", directional="true")
-    bodies = {b.get("name"): b for b in world.iter("body")}
+    bodies = {body.get("name"): body for body in world.iter("body")}
     bodies[cfg.asset.root_body].set("pos", " ".join(map(str, cfg.init_state.pos)))
-    # Vendor Go2 foot collision geoms live on the calves. Move them to their
-    # welded foot frames so calf collision penalties do not punish foot contact.
-    for foot in cfg.asset.feet:
-        if foot.endswith("_foot"):
-            leg = foot[:-5]
-            calf = bodies[f"{leg}_calf"]
-            geom = calf.find(f"geom[@name='{leg}']")
-            if geom is not None:
-                calf.remove(geom)
-                geom.set("pos", "-0.002 0 0")
-                bodies[foot].append(geom)
-    for joint in world.iter("joint"):
-        joint.set("damping", "0")  # Damping is applied by task PD, exactly once.
-        joint.set("armature", str(cfg.control.armature))
-        joint.set("frictionloss", str(cfg.control.frictionloss))
-        # Vendor G1 joint force ranges differ from the training actuator limits.
-        # The task's motor ctrlrange is the single source of torque saturation.
-        joint.set("actuatorfrclimited", "false")
+    feet = set(foot_geom_names(cfg))
+    self_collisions = getattr(cfg.asset, "self_collisions", False)
+    collision_geoms = []
+    for geom in world.iter("geom"):
+        name = geom.get("name", "")
+        if name.endswith("_collision"):
+            collision_geoms.append(name)
+            geom.attrib.update(
+                contype="1",
+                conaffinity="1" if self_collisions else "0",
+                condim="3" if name in feet else "1",
+                priority="1" if name in feet else "0",
+            )
+            if name in feet:
+                geom.set("friction", "0.6 0.005 0.0001")
+                solimp = getattr(cfg.asset, "foot_solimp", [0.9, 0.95, 0.023, 0.5, 2])
+                if solimp is not None:
+                    geom.set("solimp", " ".join(map(str, solimp)))
+    arms = joint_parameters(cfg.asset.joint_names, cfg.control.armature)
+    kp = joint_parameters(cfg.asset.joint_names, cfg.control.stiffness)
+    kd = joint_parameters(cfg.asset.joint_names, cfg.control.damping)
     limits = joint_parameters(cfg.asset.joint_names, cfg.control.effort_limits)
     actuators = ET.SubElement(root, "actuator")
-    for name, limit in zip(cfg.asset.joint_names, limits):
-        ET.SubElement(actuators, "motor", name=name, joint=name, ctrllimited="true", ctrlrange=f"{-limit} {limit}")
-    sensors = ET.SubElement(root, "sensor")
-    for name in bodies:
-        ET.SubElement(sensors, "contact", name=f"contact_{name}", body2=name, data="force", reduce="netforce")
-    for name in cfg.asset.feet:
-        ET.SubElement(sensors, "framelinvel", name=f"velocity_{name}", objtype="body", objname=name)
+    for name, arm, p, d, limit in zip(cfg.asset.joint_names, arms, kp, kd, limits):
+        joint = world.find(f".//joint[@name='{name}']")
+        joint.attrib.update(armature=str(arm), frictionloss=str(cfg.control.frictionloss))
+        ET.SubElement(
+            actuators,
+            "position",
+            name=name,
+            joint=name,
+            kp=str(p),
+            kv=str(d),
+            forcelimited="true",
+            forcerange=f"{-limit} {limit}",
+            ctrllimited="false",
+        )
+    sensors = root.find("sensor")
+    ET.SubElement(sensors, "framelinvel", name="root_link_velocity", objtype="xbody", objname=cfg.asset.root_body)
+    ET.SubElement(
+        sensors, "frameangvel", name="root_link_angular_velocity", objtype="xbody", objname=cfg.asset.root_body
+    )
+    reward_body = getattr(cfg.asset, "reward_body", cfg.asset.root_body)
+    if reward_body != cfg.asset.root_body:
+        ET.SubElement(sensors, "frameangvel", name="reward_body_angular_velocity", objtype="xbody", objname=reward_body)
+    for site in cfg.asset.foot_sites:
+        ET.SubElement(sensors, "framelinvel", name=f"site_velocity_{site}", objtype="site", objname=site)
+    foot_bodies = getattr(cfg.asset, "foot_contact_bodies", None)
+    for name in collision_geoms if foot_bodies is None else ():
+        ET.SubElement(
+            sensors,
+            "contact",
+            name=f"geom_contact_{name}",
+            geom1=name,
+            geom2="floor",
+            data="found force",
+            reduce="netforce" if name in feet else "none",
+            num="1",
+        )
+    if foot_bodies is not None:
+        for body in foot_bodies:
+            ET.SubElement(
+                sensors,
+                "contact",
+                name=f"foot_contact_{body}",
+                subtree1=body,
+                geom2="floor",
+                data="found force",
+                reduce="netforce",
+                num="1",
+            )
+    if self_collisions:
+        ET.SubElement(
+            sensors,
+            "contact",
+            name="self_collision",
+            subtree1=cfg.asset.root_body,
+            subtree2=cfg.asset.root_body,
+            data="found force",
+            reduce="none",
+            num="1",
+        )
     model = mujoco.MjModel.from_xml_string(ET.tostring(root, encoding="unicode"))
-    terrain.populate_model(model)
-    if model.nq != 7 + cfg.env.num_actions or model.nv != 6 + cfg.env.num_actions:
-        raise ValueError("Expected one floating base and the configured number of hinge joints")
     return model
 
 
 class MujocoBatch:
     def __init__(self, cfg, rng):
-        self.terrain = Terrain(cfg.terrain, cfg.env.num_envs, cfg.seed)
-        self.model = load_model(cfg, self.terrain)
+        path = Path(LEGGED_GYM_RESOURCES_DIR) / "robots" / cfg.asset.file
+        source = ET.parse(path).getroot()
+        digest = hashlib.sha256(path.read_bytes())
+        meshdir = path.parent / source.find("compiler").get("meshdir", "")
+        for mesh in source.findall("asset/mesh"):
+            digest.update((meshdir / mesh.get("file")).read_bytes())
+        self.asset_digest = digest.hexdigest()
+        self.model = load_model(cfg)
         self.batch = batch.Batch(
             self.model, nsim=cfg.env.num_envs, nthread=cfg.sim.nthread, persistent=cfg.sim.persistent
         )
@@ -97,42 +175,79 @@ class MujocoBatch:
         self.joint_ids = np.array([self.model.joint(n).id for n in cfg.asset.joint_names])
         self.qpos_ids = self.model.jnt_qposadr[self.joint_ids]
         self.qvel_ids = self.model.jnt_dofadr[self.joint_ids]
-        self.body_names = [self.model.body(i).name for i in range(1, self.model.nbody)]
-        self.feet_ids = np.array([self.model.body(n).id for n in cfg.asset.feet])
-        self.contact_columns = np.array(
-            [
-                np.arange(self.model.sensor(f"contact_{n}").adr[0], self.model.sensor(f"contact_{n}").adr[0] + 3)
-                for n in self.body_names
-            ]
-        )
-        self.velocity_columns = np.array(
-            [
-                np.arange(self.model.sensor(f"velocity_{n}").adr[0], self.model.sensor(f"velocity_{n}").adr[0] + 3)
-                for n in cfg.asset.feet
-            ]
-        )
         self._randomize_model(cfg, rng)
         self.batch.reset()
+        self.qacc = self.batch.bind("qacc")
+        self.xquat = self.batch.bind("xquat")
+        self.site_xpos = self.batch.bind("site_xpos")
+        self.root_id = self.model.body(cfg.asset.root_body).id
+        self.reward_body_id = self.model.body(getattr(cfg.asset, "reward_body", cfg.asset.root_body)).id
+        self.site_ids = np.array([self.model.site(name).id for name in cfg.asset.foot_sites])
+        self.foot_geoms = foot_geom_names(cfg)
+        self.nonfoot_geoms = [
+            self.model.geom(i).name
+            for i in range(self.model.ngeom)
+            if self.model.geom(i).name.endswith("_collision") and self.model.geom(i).name not in self.foot_geoms
+        ]
+        foot_bodies = getattr(cfg.asset, "foot_contact_bodies", None)
+        self.foot_columns = self._columns(
+            [f"foot_contact_{body}" for body in foot_bodies]
+            if foot_bodies is not None
+            else [f"geom_contact_{name}" for name in self.foot_geoms]
+        )
+        self.history_columns = self._columns(
+            ["self_collision"]
+            if getattr(cfg.asset, "self_collisions", False)
+            else [f"geom_contact_{name}" for name in self.nonfoot_geoms]
+        )
+        self.history_contact_count = len(self.history_columns)
+        self.site_velocity_columns = self._columns([f"site_velocity_{site}" for site in cfg.asset.foot_sites])
+
+    def _columns(self, names):
+        return np.array(
+            [
+                np.arange(
+                    self.model.sensor(name).adr[0], self.model.sensor(name).adr[0] + self.model.sensor(name).dim[0]
+                )
+                for name in names
+            ]
+        )
+
+    def sensor(self, name):
+        sensor = self.model.sensor(name)
+        return self.sensordata[:, sensor.adr[0] : sensor.adr[0] + sensor.dim[0]]
 
     def _randomize_model(self, cfg, rng):
         if cfg.domain_rand.randomize_friction:
             friction = self.batch.expand("geom_friction")
-            friction[:, :, 0] = rng.uniform(*cfg.domain_rand.friction_range, (cfg.env.num_envs, 1))
-        if cfg.domain_rand.randomize_base_mass:
-            body_id = self.model.body(cfg.asset.mass_body).id
-            masses = self.batch.expand("body_mass")
-            inertias = self.batch.expand("body_inertia")
-            original = self.model.body_mass[body_id]
-            randomized = original + rng.uniform(*cfg.domain_rand.added_mass_range, cfg.env.num_envs)
-            if np.any(randomized <= 0):
-                raise ValueError("Base mass randomization must leave strictly positive masses")
-            masses[:, body_id] = randomized
-            inertias[:, body_id] *= (randomized / original)[:, None]
+            ids = [self.model.geom(name).id for name in foot_geom_names(cfg)]
+            friction[:, ids, 0] = rng.uniform(*cfg.domain_rand.friction_range, (cfg.env.num_envs, 1))
+        self.encoder_bias = np.zeros((cfg.env.num_envs, cfg.env.num_actions))
+        if cfg.domain_rand.randomize_encoder_bias:
+            self.encoder_bias[:] = rng.uniform(*cfg.domain_rand.encoder_bias_range, self.encoder_bias.shape)
+        if cfg.domain_rand.randomize_com:
+            com = self.batch.expand("body_ipos")
+            com[:, self.model.body(cfg.asset.mass_body).id] += rng.uniform(
+                *cfg.domain_rand.com_range, (cfg.env.num_envs, 3)
+            )
             self.batch.set_const()
 
-    def step(self, torque, *, observe=False):
-        self.ctrl[:] = torque
-        self.batch.step(stage=mujoco.mjtStage.mjSTAGE_VEL if observe else mujoco.mjtStage.mjSTAGE_NONE)
+    @property
+    def foot_contacts(self):
+        return self.sensordata[:, self.foot_columns]
+
+    @property
+    def history_contacts(self):
+        return self.sensordata[:, self.history_columns]
+
+    def close(self):
+        self.qacc = self.xquat = self.site_xpos = None
+        self.qpos = self.qvel = self.ctrl = self.xpos = self.sensordata = None
+        self.batch = None
+
+    def step(self, targets):
+        self.ctrl[:] = targets
+        self.batch.step(stage=mujoco.mjtStage.mjSTAGE_NONE)
         bad_state_warnings = [
             int(mujoco.mjtWarning.mjWARN_BADQPOS),
             int(mujoco.mjtWarning.mjWARN_BADQVEL),
@@ -149,17 +264,3 @@ class MujocoBatch:
 
     def forward(self, ids=None):
         self.batch.forward(ids)
-
-    @property
-    def contact_forces(self):
-        return self.sensordata[:, self.contact_columns]
-
-    @property
-    def feet_velocities(self):
-        return self.sensordata[:, self.velocity_columns]
-
-    def close(self):
-        # The public Batch API owns its pool through object lifetime. Release
-        # exported views too: their base objects keep the native batch alive.
-        self.qpos = self.qvel = self.ctrl = self.xpos = self.sensordata = None
-        self.batch = None

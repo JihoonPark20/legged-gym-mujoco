@@ -1,0 +1,14 @@
+{
+  "repository": "https://github.com/unitreerobotics/unitree_rl_mjlab",
+  "revision": "1425b15f73bd4095f0df53709d7c389c3eb9e790",
+  "mjlab_version": "1.2.0",
+  "reference_mujoco_warp": "3.5.0",
+  "reference_rsl_rl": "5.0.1",
+  "asset_source": "src/assets/robots/unitree_go2/xmls/go2.xml",
+  "source_sha256": "077fc7f70ce2ddcfdab814aa0800efa2c974db6c98594b2f7663f779509fb912",
+  "notes": [
+    "MJCF copied unchanged; collision, actuator and simulation settings applied at model construction.",
+    "All 16 visual OBJ meshes match the pinned repository git blobs and reuse resources/robots/go2/assets.",
+    "CPU MuJoCo 3.17 double precision replaces MuJoCo Warp 3.5 float precision; trajectories are not guaranteed identical."
+  ]
+}

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
-# 
+#
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
 #
@@ -31,10 +31,10 @@
 import os
 
 LEGGED_GYM_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-LEGGED_GYM_ENVS_DIR = os.path.join(LEGGED_GYM_ROOT_DIR, 'legged_gym', 'envs')
+LEGGED_GYM_ENVS_DIR = os.path.join(LEGGED_GYM_ROOT_DIR, "legged_gym", "envs")
 
 # Source/editable installs follow legged_gym's root resources/ convention.
 # Wheels package that same directory as the data package legged_gym.resources.
-LEGGED_GYM_RESOURCES_DIR = os.path.join(LEGGED_GYM_ROOT_DIR, 'resources')
-if not os.path.isfile(os.path.join(LEGGED_GYM_RESOURCES_DIR, 'robots', 'provenance.json')):
-    LEGGED_GYM_RESOURCES_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'resources')
+LEGGED_GYM_RESOURCES_DIR = os.path.join(LEGGED_GYM_ROOT_DIR, "resources")
+if not os.path.isfile(os.path.join(LEGGED_GYM_RESOURCES_DIR, "robots", "provenance.json")):
+    LEGGED_GYM_RESOURCES_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "resources")
