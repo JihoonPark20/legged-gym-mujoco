@@ -109,6 +109,39 @@ class LeggedRobotCfg(BaseConfig):
 class LeggedRobotCfgPPO(BaseConfig):
     seed = 42
 
+    # Agent definitions select external implementations; construction is shared
+    # by policy family, rather than implemented in a module per algorithm.
+    agents = {
+        "ppo": {
+            "kind": "on_policy",
+            "runner_class": "rsl_rl.runners:OnPolicyRunner",
+            "algorithm_class": "rsl_rl.algorithms:PPO",
+            "actor_class": "rsl_rl.models:MLPModel",
+            "critic_class": "rsl_rl.models:MLPModel",
+            "parameter_group": "algorithm",
+            "construction": "upstream",
+            "distribution": "gaussian",
+            "learning_rate_fields": ["learning_rate"],
+            "install_hint": "python -m pip install -e '.[ppo]'",
+        },
+        "sac": {
+            "kind": "off_policy",
+            "runner_class": "rsl_rl.runners:OffPolicyRunner",
+            "algorithm_class": "rsl_rl.algorithms:SAC",
+            "actor_class": "rsl_rl.models:SACActorModel",
+            "critic_class": "rsl_rl.models:SACCriticModel",
+            "storage_class": "rsl_rl.storage:ReplayBuffer",
+            "parameter_group": "sac",
+            "construction": "actor_critic_replay",
+            "distribution": "squashed_gaussian",
+            "action_transform": "joint_limits",
+            "learning_rate_fields": ["actor_learning_rate", "critic_learning_rate", "alpha_learning_rate"],
+            "refill_replay_on_resume": True,
+            "checkpoint_counters": ["update_step"],
+            "install_hint": "python -m pip install -e '.[sac]' (in a separate environment)",
+        },
+    }
+
     class evaluation:
         num_envs = 16
         seeds = [0, 1, 2]
@@ -137,6 +170,7 @@ class LeggedRobotCfgPPO(BaseConfig):
         port = 8080
 
     class runner:
+        algorithm = "ppo"
         experiment_name = "locomotion"
         max_iterations = 10001
         num_steps_per_env = 24
@@ -163,3 +197,26 @@ class LeggedRobotCfgPPO(BaseConfig):
         schedule = "adaptive"
         use_clipped_value_loss = True
         value_loss_coef = 1.0
+
+    class sac:
+        # Separate from PPO so unsupported PPO parameters never reach SAC.
+        replay_buffer_size = 262144  # Total transitions across all environments.
+        mini_batch_size = 256
+        num_learning_epochs = 1
+        num_mini_batches = 1
+        actor_learning_rate = 0.0003
+        critic_learning_rate = 0.0003
+        alpha_learning_rate = 0.0003
+        auto_alpha = True
+        alpha = 0.05
+        tau = 0.005
+        gamma = 0.99
+        target_entropy_scale = 1.0
+        max_grad_norm = 1.0
+        policy_frequency = 2
+        n_steps = 1
+
+    class off_policy:
+        num_steps_per_env = 1
+        start_training = 100  # Collection iterations before updates; also after resume.
+        log_interval = 20

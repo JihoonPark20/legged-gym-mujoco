@@ -215,7 +215,13 @@ class LeggedRobot(VecEnv):
         self._update_diagnostics()
         rewards = torch.from_numpy(self.rew_buf.astype(np.float32))
         dones = torch.from_numpy(self.reset_buf.copy())
-        extras = {"time_outs": torch.from_numpy(self.time_out_buf.copy())}
+        # True termination takes precedence when a failure coincides with the time limit.
+        time_outs = self.time_out_buf & ~self.terminated_buf
+        extras = {"time_outs": torch.from_numpy(time_outs.copy())}
+        if getattr(self, "capture_terminal_observations", False) and time_outs.any():
+            # Replay must bootstrap from the final state, never the auto-reset state.
+            self.compute_observations()
+            extras["time_outs_obs"] = self.obs_buf.clone()
         ids = np.flatnonzero(self.reset_buf)
         if ids.size:
             extras["log"] = self._episode_metrics(ids)

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Based on legged_gym task_registry, Copyright (c) 2021 ETH Zurich, Nikita Rudin.
-"""Task construction and the rsl-rl runner configuration boundary."""
+"""Task construction, run snapshots, and delegation to the shared agent factory."""
 
 import json
 from copy import deepcopy
@@ -8,11 +8,9 @@ from datetime import datetime
 from importlib.metadata import version
 from pathlib import Path
 
-import torch
-from rsl_rl.runners import OnPolicyRunner
-
 from legged_gym import LEGGED_GYM_ROOT_DIR
 
+from .agent_factory import create_agent, override_learning_rate, policy_contract
 from .helpers import (
     class_to_dict,
     get_args,
@@ -22,106 +20,6 @@ from .helpers import (
     update_cfg_from_args,
     update_class_from_dict,
 )
-
-
-def policy_contract(env):
-    """Fields that must match when a saved policy is applied to this task."""
-    contract = {
-        "version": 2,
-        "robot": env.cfg.asset.file,
-        "asset_sha256": env.sim.asset_digest,
-        "joint_names": env.dof_names,
-        "policy_obs": env.num_obs,
-        "critic_obs": env.num_privileged_obs,
-        "sim_dt": env.cfg.sim.dt,
-        "decimation": env.cfg.control.decimation,
-        "action_scale": env.cfg.control.action_scale,
-        "clip_actions": env.cfg.control.clip_actions,
-        "default_joint_pos": env.default_dof_pos.tolist(),
-        "kp": env.p_gains.tolist(),
-        "kd": env.d_gains.tolist(),
-        "effort_limits": env.torque_limits.tolist(),
-        "armature": env.cfg.control.armature,
-        "frictionloss": env.cfg.control.frictionloss,
-        "foot_sites": env.cfg.asset.foot_sites,
-        "solver_settings": {
-            key: getattr(env.cfg.sim, key)
-            for key in ("iterations", "cone", "ls_iterations", "tolerance", "ls_tolerance", "ccd_iterations")
-        },
-    }
-    if hasattr(env.cfg.asset, "self_collisions"):
-        contract["contact_settings"] = {
-            key: getattr(env.cfg.asset, key)
-            for key in ("self_collisions", "foot_contact_bodies", "foot_geoms", "foot_solimp", "reward_body")
-        }
-    return contract
-
-
-def runner_config(cfg):
-    policy = class_to_dict(cfg.policy)
-    algorithm = class_to_dict(cfg.algorithm)
-    return {
-        "seed": cfg.seed,
-        "num_steps_per_env": cfg.runner.num_steps_per_env,
-        "save_interval": cfg.runner.save_interval,
-        "obs_groups": {"actor": ["policy"], "critic": ["critic"]},
-        "actor": {
-            "class_name": "rsl_rl.models:MLPModel",
-            "hidden_dims": policy["actor_hidden_dims"],
-            "activation": policy["activation"],
-            "obs_normalization": policy["obs_normalization"],
-            "distribution_cfg": {
-                "class_name": "rsl_rl.modules:GaussianDistribution",
-                "std_type": "scalar",
-                "init_std": policy["init_noise_std"],
-            },
-        },
-        "critic": {
-            "class_name": "rsl_rl.models:MLPModel",
-            "hidden_dims": policy["critic_hidden_dims"],
-            "activation": policy["activation"],
-            "obs_normalization": policy["obs_normalization"],
-        },
-        "algorithm": {
-            "class_name": "rsl_rl.algorithms:PPO",
-            "rnd_cfg": None,
-            "symmetry_cfg": None,
-            **algorithm,
-        },
-        "logger": "tensorboard",
-        "check_for_nan": True,
-    }
-
-
-class LeggedOnPolicyRunner(OnPolicyRunner):
-    """Upstream PPO, with policy-contract and curriculum checkpoint metadata."""
-
-    def save(self, path, infos=None):
-        metadata = dict(infos or {})
-        metadata["legged_gym"] = {
-            "contract": policy_contract(self.env),
-            "training_state": self.env.training_state_dict(),
-            "next_iteration": self.current_learning_iteration + 1,
-        }
-        super().save(path, metadata)
-
-    def load(self, path, load_cfg=None, strict=True, map_location=None, *, restore_env=True):
-        checkpoint = torch.load(path, weights_only=False, map_location="cpu")
-        metadata = (checkpoint.get("infos") or {}).get("legged_gym")
-        if metadata is None or any(
-            metadata.get("contract", {}).get(key) != value for key, value in policy_contract(self.env).items()
-        ):
-            raise ValueError("Checkpoint policy contract does not match this robot/configuration")
-        del checkpoint
-        # Load on CPU, then let model/optimizer state_dict loading place tensors
-        # on the constructed learner device. This also keeps Adam step scalars portable.
-        infos = super().load(path, load_cfg, strict, map_location or "cpu")
-        if restore_env:
-            self.current_learning_iteration = infos["legged_gym"].get(
-                "next_iteration", self.current_learning_iteration + 1
-            )
-            self.env.load_training_state_dict(infos["legged_gym"]["training_state"])
-        return infos
 
 
 class TaskRegistry:
@@ -179,10 +77,6 @@ class TaskRegistry:
         return env, env_cfg
 
     def make_alg_runner(self, env, name=None, args=None, train_cfg=None, log_root="default"):
-        if version("rsl-rl-lib") != "5.0.1":
-            raise RuntimeError(
-                "This project requires rsl-rl-lib 5.0.1. Install dependencies with: python -m pip install -e ."
-            )
         args = get_args() if args is None else args
         if train_cfg is None:
             if name is None:
@@ -210,13 +104,14 @@ class TaskRegistry:
                         "env": class_to_dict(env.cfg),
                         "train": class_to_dict(train_cfg),
                         "rl_device": device,
+                        "rsl_rl_version": version("rsl-rl-lib"),
                         "contract": policy_contract(env),
                     },
                     indent=2,
                 )
                 + "\n"
             )
-        runner = LeggedOnPolicyRunner(env, runner_config(train_cfg), log_dir, device=device)
+        runner = create_agent(env, train_cfg, log_dir, device=device)
         if getattr(args, "resume", False) or getattr(args, "checkpoint_path", None):
             path = getattr(args, "checkpoint_path", None)
             if path is None:
@@ -226,9 +121,7 @@ class TaskRegistry:
             # update both Adam and PPO's adaptive scheduler after that restore.
             learning_rate = getattr(args, "learning_rate", None)
             if learning_rate is not None:
-                runner.alg.learning_rate = learning_rate
-                for group in runner.alg.optimizer.param_groups:
-                    group["lr"] = learning_rate
+                override_learning_rate(runner.alg, learning_rate)
         return runner, train_cfg
 
 

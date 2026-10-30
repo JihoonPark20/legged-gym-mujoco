@@ -1,4 +1,4 @@
-"""Read-only Viser monitoring of a selected training environment and PPO progress.
+"""Read-only Viser monitoring of a selected training environment and learning progress.
 
 The trainer copies at most one state per display interval. Rendering uses a
 private MuJoCo model/data pair on a worker thread, with a single pending frame.
@@ -91,7 +91,7 @@ class TrainingMonitor:
         self.freeze = gui.add_checkbox(
             "Freeze view", initial_value=False, hint="Training continues while the view is frozen."
         )
-        self.progress = gui.add_markdown("Waiting for the first PPO iteration…")
+        self.progress = gui.add_markdown("Waiting for the first training iteration…")
         self.motion = gui.add_markdown("Waiting for a training frame…")
         empty = np.array([0.0], dtype=np.float64)
         self.velocity_plot = gui.add_uplot(
@@ -180,7 +180,8 @@ class TrainingMonitor:
                 "reward": reward,
                 "length": length,
                 "lr": kwargs["learning_rate"],
-                "fps": self.env.num_envs * self.runner.cfg["num_steps_per_env"] / max(elapsed, 1e-9),
+                "fps": kwargs.get("collection_size_override", self.env.num_envs * self.runner.cfg["num_steps_per_env"])
+                / max(elapsed, 1e-9),
                 "collect": kwargs["collect_time"],
                 "learn": kwargs["learn_time"],
             }
@@ -204,7 +205,7 @@ class TrainingMonitor:
                     self._shown_stats_version = version
         except Exception as error:
             self._stop.set()
-            print(f"Training monitor stopped updating: {error}. PPO training continues.")
+            print(f"Training monitor stopped updating: {error}. Training continues.")
 
     def _publish_frame(self, frame):
         self.data.qpos[:] = frame["qpos"]
@@ -258,7 +259,7 @@ class TrainingMonitor:
             f"**Iteration {stats['iteration'] + 1:,} / {stats['total']:,}**\n\n"
             f"Episode return: **{reward}** · Length: **{length}**\n\n"
             f"{stats['fps']:,.0f} samples/s · LR {stats['lr']:.2g}\n\n"
-            f"Collection {stats['collect']:.2f}s · PPO {stats['learn']:.2f}s"
+            f"Collection {stats['collect']:.2f}s · Update {stats['learn']:.2f}s"
         )
         if history:
             self.reward_plot.data = tuple(np.asarray(history, dtype=float).T)

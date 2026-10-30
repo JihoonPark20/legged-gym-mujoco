@@ -7,18 +7,23 @@ import sys
 
 from legged_gym.envs import task_registry
 from legged_gym.utils import get_args
+from legged_gym.utils.agent_factory import agent_parameters, check_backend
 
 
 def train(args):
-    env, _ = task_registry.make_env(name=args.task, args=args)
+    env_cfg, train_cfg = task_registry.get_cfgs(args.task, args)
+    check_backend(train_cfg)  # Fail before allocating simulation if the backend is unavailable.
+    env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
     monitor = None
     try:
-        runner, cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args)
-        print(f"MuJoCo CPU: {env.num_envs} envs / {env.sim.batch.nthread} workers; PPO: {runner.device}")
-        print(
-            f"PPO settings: max_grad_norm={runner.alg.max_grad_norm:g}, "
-            f"desired_kl={runner.alg.desired_kl:g}, learning_rate={runner.alg.learning_rate:g}"
-        )
+        runner, cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
+        algorithm = cfg.runner.algorithm.upper()
+        print(f"MuJoCo CPU: {env.num_envs} envs / {env.sim.batch.nthread} workers; {algorithm}: {runner.device}")
+        parameters = agent_parameters(cfg)
+        fields = ["max_grad_norm", "desired_kl", "replay_buffer_size", "mini_batch_size"]
+        fields += runner.agent_spec["learning_rate_fields"]
+        settings = ", ".join(f"{key}={getattr(parameters, key)}" for key in fields if hasattr(parameters, key))
+        print(f"{algorithm} settings: {settings}")
         print(f"Logs: {runner.logger.log_dir}")
         if cfg.viewer.enabled and not args.headless:
             try:

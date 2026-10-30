@@ -96,7 +96,15 @@ def get_load_path(root, load_run=-1, checkpoint=-1):
 
 
 def get_args(argv=None, *, default_rl_device="auto", playback=False):
-    parser = argparse.ArgumentParser(description="MuJoCo batch CPU physics + rsl-rl PPO (MPS/CUDA/CPU)")
+    parser = argparse.ArgumentParser(description="MuJoCo batch CPU physics + rsl_rl (MPS/CUDA/CPU)")
+    parser.add_argument("--algorithm", help="Agent key from train_cfg.agents; default: ppo or checkpoint's agent")
+    parser.add_argument(
+        "--replay_buffer_size", "--replay-buffer-size", type=int, help="Off-policy total replay transitions"
+    )
+    parser.add_argument("--batch_size", "--batch-size", type=int, help="Off-policy update batch size")
+    parser.add_argument(
+        "--start_training", "--start-training", type=int, help="Off-policy warmup collection iterations"
+    )
     parser.add_argument(
         "--task",
         default="go2",
@@ -126,7 +134,7 @@ def get_args(argv=None, *, default_rl_device="auto", playback=False):
         "--max_grad_norm",
         "--max-grad-norm",
         type=float,
-        help="PPO gradient norm limit",
+        help="Gradient norm limit",
     )
     parser.add_argument("--desired_kl", "--desired-kl", type=float, help="Target KL for PPO's adaptive learning rate")
     parser.add_argument(
@@ -171,7 +179,7 @@ def get_args(argv=None, *, default_rl_device="auto", playback=False):
             help="Directory for evaluation JSON/CSV (default: checkpoint directory/evaluations)",
         )
     args = parser.parse_args(argv)
-    for name in ("num_envs", "max_iterations", "torch_threads", "steps"):
+    for name in ("num_envs", "max_iterations", "torch_threads", "steps", "replay_buffer_size", "batch_size"):
         value = getattr(args, name)
         if value is not None and value <= 0:
             parser.error(f"{name} must be positive")
@@ -181,6 +189,8 @@ def get_args(argv=None, *, default_rl_device="auto", playback=False):
             parser.error(f"{name} must be finite and positive")
     if args.num_threads is not None and args.num_threads < 0:
         parser.error("num_threads must be nonnegative")
+    if args.start_training is not None and args.start_training < 0:
+        parser.error("start_training must be nonnegative")
     if playback:
         if not args.evaluate and (args.eval_seeds is not None or args.eval_output is not None):
             parser.error("eval_seeds and eval_output require --evaluate")
@@ -209,10 +219,31 @@ def update_cfg_from_args(env_cfg, train_cfg, args):
         if getattr(args, "num_threads", None) is not None:
             env_cfg.sim.nthread = args.num_threads
     if train_cfg is not None:
+        from .agent_factory import agent_parameters, agent_spec
+
+        selected = getattr(args, "algorithm", None)
+        if selected is not None:
+            train_cfg.runner.algorithm = selected
+        spec = agent_spec(train_cfg)
+        parameters = agent_parameters(train_cfg)
+        for arg, field in (("replay_buffer_size", "replay_buffer_size"), ("batch_size", "mini_batch_size")):
+            value = getattr(args, arg, None)
+            if value is not None:
+                if spec["kind"] != "off_policy" or not hasattr(parameters, field):
+                    raise ValueError(f"--{arg} is unsupported by this agent")
+                setattr(parameters, field, value)
+        if getattr(args, "start_training", None) is not None:
+            if spec["kind"] != "off_policy":
+                raise ValueError("--start_training requires an off_policy agent")
+            train_cfg.off_policy.start_training = args.start_training
         for key in ("max_grad_norm", "desired_kl", "learning_rate"):
             value = getattr(args, key, None)
             if value is not None:
-                setattr(train_cfg.algorithm, key, value)
+                fields = spec["learning_rate_fields"] if key == "learning_rate" else [key]
+                for field in fields:
+                    if not hasattr(parameters, field):
+                        raise ValueError(f"--{key} is unsupported by this agent")
+                    setattr(parameters, field, value)
         for key in ("max_iterations", "experiment_name", "run_name"):
             value = getattr(args, key, None)
             if value is not None:
