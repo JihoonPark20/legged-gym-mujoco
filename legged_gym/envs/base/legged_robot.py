@@ -89,6 +89,11 @@ class LeggedRobot(VecEnv):
             )
         }
         self._liftoff_count = np.zeros(self.num_envs)
+        self.rew_buf = np.zeros(self.num_envs)
+        policy_width = 11 + 3 * self.num_actions
+        self._critic_obs_work = np.empty((self.num_envs, policy_width + 3 + 6 * feet_shape[1]))
+        self._policy_obs_work = np.empty((self.num_envs, policy_width))
+        self._obs_noise_scale = np.zeros(policy_width)
         self.obs_buf = None
         self._viewer = self._viewer_model = self._viewer_data = None
         self._closed = False
@@ -101,7 +106,7 @@ class LeggedRobot(VecEnv):
         self.reward_functions = {name: getattr(self, f"_reward_{name}") for name in self.reward_scales}
 
     def compute_reward(self):
-        self.rew_buf = np.zeros(self.num_envs)
+        self.rew_buf.fill(0)
         for name, function in self.reward_functions.items():
             value = function() * self.reward_scales[name] * self.dt
             self.rew_buf += value
@@ -214,10 +219,11 @@ class LeggedRobot(VecEnv):
         self.compute_reward()
         self._update_diagnostics()
         rewards = torch.from_numpy(self.rew_buf.astype(np.float32))
-        dones = torch.from_numpy(self.reset_buf.copy())
+        # check_termination replaces these arrays; reset_idx does not mutate them.
+        dones = torch.from_numpy(self.reset_buf)
         # True termination takes precedence when a failure coincides with the time limit.
         time_outs = self.time_out_buf & ~self.terminated_buf
-        extras = {"time_outs": torch.from_numpy(time_outs.copy())}
+        extras = {"time_outs": torch.from_numpy(time_outs)}
         if getattr(self, "capture_terminal_observations", False) and time_outs.any():
             # Replay must bootstrap from the final state, never the auto-reset state.
             self.compute_observations()
@@ -372,49 +378,50 @@ class LeggedRobot(VecEnv):
             * 2
             * np.pi
         )
-        phase = np.stack((np.sin(angle), np.cos(angle)), axis=1)
-        phase[np.linalg.norm(self.commands, axis=1) < 0.1] = 0
-        clean = np.concatenate(
-            (
-                self.sim.sensor("imu_ang_vel"),
-                self.projected_gravity,
-                self.commands,
-                phase,
-                self.dof_pos - self.default_dof_pos,
-                self.dof_vel,
-                self.actions,
-            ),
-            axis=1,
-        )
-        actor = clean.copy()
+        # Reuse float64 scratch space, retaining MuJoCo precision until export.
+        critic = self._critic_obs_work
+        clean = critic[:, : self._policy_obs_work.shape[1]]
+        clean[:, :3] = self.sim.sensor("imu_ang_vel")
+        clean[:, 3:6] = self.projected_gravity
+        clean[:, 6:9] = self.commands
+        np.sin(angle, out=clean[:, 9])
+        np.cos(angle, out=clean[:, 10])
+        clean[np.linalg.norm(self.commands, axis=1) < 0.1, 9:11] = 0
+        n = self.num_actions
+        np.subtract(self.dof_pos, self.default_dof_pos, out=clean[:, 11 : 11 + n])
+        clean[:, 11 + n : 11 + 2 * n] = self.dof_vel
+        clean[:, 11 + 2 * n :] = self.actions
+        actor = clean
         if self.cfg.noise.add_noise:
             cfg = self.cfg.noise
-            scale = np.r_[
-                np.full(3, cfg.ang_vel),
-                np.full(3, cfg.gravity),
-                np.zeros(5),
-                np.full(self.num_actions, cfg.joint_pos),
-                np.full(self.num_actions, cfg.joint_vel),
-                np.zeros(self.num_actions),
-            ]
-            actor += self.rng.uniform(-1, 1, actor.shape) * scale
+            scale = self._obs_noise_scale
+            scale[:3], scale[3:6] = cfg.ang_vel, cfg.gravity
+            scale[11 : 11 + n], scale[11 + n : 11 + 2 * n] = cfg.joint_pos, cfg.joint_vel
+            actor = self._policy_obs_work
+            self.rng.random(out=actor)
+            actor *= 2
+            actor -= 1
+            actor *= scale
+            actor += clean
         if self._foot_sensor_cache is None:
             self._foot_sensor_cache = self.sim.foot_contacts
         contacts = self._foot_sensor_cache
         forces = contacts[:, :, 1:].reshape(self.num_envs, -1)
-        critic = np.concatenate(
-            (
-                clean,
-                self.sim.sensor("imu_lin_vel"),
-                self.feet_pos[:, :, 2],
-                self.feet_air_time,
-                (contacts[:, :, 0] > 0).astype(float),
-                np.sign(forces) * np.log1p(np.abs(forces)),
-            ),
-            axis=1,
-        )
+        offset = clean.shape[1]
+        for values in (
+            self.sim.sensor("imu_lin_vel"),
+            self.feet_pos[:, :, 2],
+            self.feet_air_time,
+            contacts[:, :, 0] > 0,
+            np.sign(forces) * np.log1p(np.abs(forces)),
+        ):
+            width = values.shape[1]
+            critic[:, offset : offset + width] = values
+            offset += width
         if not np.isfinite(actor).all() or not np.isfinite(critic).all():
             raise FloatingPointError("Nonfinite mjlab observation")
+        # Export independent snapshots: CPU learners can retain the previous
+        # observation until after step(), and TensorDict.to("cpu") need not copy.
         self.obs_buf = TensorDict(
             {
                 "policy": torch.from_numpy(actor.astype(np.float32)),
