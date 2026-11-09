@@ -40,13 +40,14 @@ class TrainingMonitor:
         self.server = None
         self._attached = False
         self._closed = False
-        self._original_step = env.step
+        self._step_method = "step_wait" if callable(getattr(env, "step_wait", None)) else "step"
+        self._original_step = getattr(env, self._step_method)
         self._original_log = runner.logger.log
         try:
             self.server = viser.ViserServer(host=cfg.host, port=cfg.port, label=f"Legged Gym · {task}", verbose=False)
             self.server.scene.set_up_direction("+z")
             # mjviser changes visualization properties; never pass the training model.
-            self.model = copy.copy(env.sim.model)
+            self.model = copy.copy(env.get_monitor_model())
             visual_bodies = self.model.geom_bodyid[self.model.geom_group == 1]
             collisions = (self.model.geom_contype != 0) & np.isin(self.model.geom_bodyid, visual_bodies)
             self.model.geom_group[collisions] = 3
@@ -65,7 +66,7 @@ class TrainingMonitor:
                 client.camera.position = root + np.array([2.5, -3.0, 1.5])
                 client.camera.look_at = root
 
-            env.step = self._step
+            setattr(env, self._step_method, self._step)
             runner.logger.log = self._log
             self._attached = True
             self._thread = threading.Thread(target=self._publish_loop, name="legged-gym-viser", daemon=True)
@@ -140,23 +141,12 @@ class TrainingMonitor:
 
     def _snapshot(self, index):
         """Called only on the trainer thread; all mutable arrays are copied."""
-        env = self.env
-        qpos = env.sim.qpos[index].copy()
-        qvel = env.sim.qvel[index].copy()
-        velocity = np.array([*env.base_lin_vel[index, :2], env.base_ang_vel[index, 2]])
-        return {
-            "env": index,
-            "time": time.monotonic() - self._start,
-            "qpos": qpos,
-            "qvel": qvel,
-            "velocity": velocity,
-            "command": env.commands[index].copy(),
-            "contacts": env._feet_contact[index].copy(),
-            "max_command_x": float(env.command_ranges[0, 1]),
-        }
+        frame = self.env.get_monitor_frame(index)
+        frame["time"] = time.monotonic() - self._start
+        return frame
 
-    def _step(self, actions):
-        result = self._original_step(actions)
+    def _step(self, *args):
+        result = self._original_step(*args)
         now = time.monotonic()
         if now - self._last_capture >= self._interval and not self._stop.is_set():
             self._last_capture = now
@@ -269,7 +259,7 @@ class TrainingMonitor:
             return
         self._closed = True
         if self._attached:
-            self.env.step = self._original_step
+            setattr(self.env, self._step_method, self._original_step)
             self.runner.logger.log = self._original_log
             self._attached = False
         self._stop.set()

@@ -121,6 +121,20 @@ class LeggedRobot(VecEnv):
         """Root-link body-frame X/Y velocity and yaw rate, as used by tracking rewards."""
         return np.column_stack((self.base_lin_vel[:, :2], self.base_ang_vel[:, 2]))
 
+    def get_monitor_model(self):
+        return self.sim.model
+
+    def get_monitor_frame(self, index):
+        return {
+            "env": index,
+            "qpos": self.sim.qpos[index].copy(),
+            "qvel": self.sim.qvel[index].copy(),
+            "velocity": np.array([*self.base_lin_vel[index, :2], self.base_ang_vel[index, 2]]),
+            "command": self.commands[index].copy(),
+            "contacts": self._feet_contact[index].copy(),
+            "max_command_x": float(self.command_ranges[0, 1]),
+        }
+
     def _update_diagnostics(self):
         # Retain the terminal sample for evaluation before step() auto-resets it.
         self.last_tracking_velocity = self.get_tracking_velocity()

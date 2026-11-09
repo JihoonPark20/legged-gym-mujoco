@@ -140,6 +140,22 @@ class LeggedRobotCfgPPO(BaseConfig):
             "checkpoint_counters": ["update_step"],
             "install_hint": "python -m pip install -e '.[sac]' (in a separate environment)",
         },
+        "flashsac": {
+            "kind": "off_policy",
+            "runner_class": "rsl_rl_flashsac.runners:OffPolicyRunner",
+            "algorithm_class": "rsl_rl_flashsac.algorithms:FlashSAC",
+            "actor_class": "rsl_rl_flashsac.models:FlashSACActor",
+            "critic_class": "rsl_rl_flashsac.models:FlashSACCritic",
+            "parameter_group": "flashsac",
+            "construction": "upstream",
+            "distribution": None,
+            "action_transform": "normalized_joint_limits",
+            "execution_adapter": "legged_gym.utils.off_policy_runner:FlashSACAdapter",
+            "learning_rate_fields": ["learning_rate_init", "learning_rate_peak", "learning_rate_end"],
+            "refill_replay_on_resume": True,
+            "install_hint": "Install a compatible rsl_rl_flashsac backend with upstream rsl-rl 5.5.2 "
+            "in a separate environment.",
+        },
     }
 
     class evaluation:
@@ -216,7 +232,23 @@ class LeggedRobotCfgPPO(BaseConfig):
         policy_frequency = 2
         n_steps = 1
 
+    class flashsac:
+        # Portable integration defaults, not a tuned locomotion recipe.
+        replay_buffer_size = 262144
+        buffer_min_length = 1000
+        mini_batch_size = 256
+        num_learning_epochs = 1
+        num_mini_batches = 1
+        learning_rate_init = 0.0003
+        learning_rate_peak = 0.0003
+        learning_rate_end = 0.00015
+        n_steps = 1
+        use_compile = False
+        use_amp = False
+
     class off_policy:
+        collector_mode = "serial"  # process overlaps CPU physics with learner updates.
+        collector_timeout = 120.0
         num_steps_per_env = 1
         start_training = 100  # Collection iterations before updates; also after resume.
         log_interval = 20

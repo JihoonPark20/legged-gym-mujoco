@@ -99,6 +99,12 @@ def get_args(argv=None, *, default_rl_device="auto", playback=False):
     parser = argparse.ArgumentParser(description="MuJoCo batch CPU physics + rsl_rl (MPS/CUDA/CPU)")
     parser.add_argument("--algorithm", help="Agent key from train_cfg.agents; default: ppo or checkpoint's agent")
     parser.add_argument(
+        "--collector_mode",
+        "--collector-mode",
+        choices=["serial", "process"],
+        help="Off-policy collection: serial (default) or CPU process overlapping learner updates",
+    )
+    parser.add_argument(
         "--replay_buffer_size", "--replay-buffer-size", type=int, help="Off-policy total replay transitions"
     )
     parser.add_argument("--batch_size", "--batch-size", type=int, help="Off-policy update batch size")
@@ -225,6 +231,10 @@ def update_cfg_from_args(env_cfg, train_cfg, args):
         if selected is not None:
             train_cfg.runner.algorithm = selected
         spec = agent_spec(train_cfg)
+        if getattr(args, "collector_mode", None) is not None:
+            if spec["kind"] != "off_policy":
+                raise ValueError("--collector_mode requires an off_policy agent")
+            train_cfg.off_policy.collector_mode = args.collector_mode
         parameters = agent_parameters(train_cfg)
         for arg, field in (("replay_buffer_size", "replay_buffer_size"), ("batch_size", "mini_batch_size")):
             value = getattr(args, arg, None)

@@ -59,8 +59,10 @@ def agent_spec(cfg):
         raise ValueError("Agent construction must be upstream or actor_critic_replay")
     if spec["construction"] == "actor_critic_replay" and spec["kind"] != "off_policy":
         raise ValueError("Replay construction requires an off_policy agent")
-    if spec.get("action_transform") not in (None, "joint_limits"):
-        raise ValueError("Unsupported action_transform; use joint_limits or the upstream constructor")
+    if spec.get("action_transform") not in (None, "joint_limits", "normalized_joint_limits"):
+        raise ValueError("Unsupported action_transform")
+    if spec.get("action_transform") == "normalized_joint_limits" and spec["construction"] != "upstream":
+        raise ValueError("normalized_joint_limits requires a normalized-action upstream backend")
     return spec
 
 
@@ -79,6 +81,8 @@ def check_backend(cfg):
     fields = ["runner_class", "algorithm_class", "actor_class", "critic_class"]
     if spec["construction"] == "actor_critic_replay":
         fields.append("storage_class")
+    if "execution_adapter" in spec:
+        fields.append("execution_adapter")
     try:
         classes = {key: resolve_class(spec[key]) for key in fields}
     except (ImportError, AttributeError) as error:
@@ -145,6 +149,7 @@ def runner_config(cfg):
     }
     if spec["kind"] == "off_policy":
         config.update(class_to_dict(cfg.off_policy))
+        config["max_iterations"] = cfg.runner.max_iterations
     if spec["construction"] == "actor_critic_replay":
         config["algorithm"]["class_name"] = "legged_gym.utils.agent_factory:ActorCriticReplay"
     return config
@@ -169,10 +174,15 @@ def action_bounds(env):
 
 def validate_config(env, cfg):
     spec = cfg["agent"]
-    if spec.get("action_transform") == "joint_limits":
+    if spec.get("action_transform") in ("joint_limits", "normalized_joint_limits"):
         action_bounds(env)
     if spec["kind"] != "off_policy":
         return
+    if cfg.get("collector_mode", "serial") not in ("serial", "process"):
+        raise ValueError("collector_mode must be serial or process")
+    timeout = cfg.get("collector_timeout", 120.0)
+    if not isinstance(timeout, (int, float)) or not 0 < timeout < float("inf"):
+        raise ValueError("collector_timeout must be finite and positive")
     for key in ("num_steps_per_env", "log_interval"):
         if not isinstance(cfg[key], int) or cfg[key] <= 0:
             raise ValueError(f"Off-policy {key} must be a positive integer")
@@ -238,9 +248,14 @@ class ActorCriticReplay:
 class AgentEnvironment:
     """Keep simulation on its own device while transferring terminal observations."""
 
-    def __init__(self, env, device):
+    def __init__(self, env, device, action_transform=None):
         self.unwrapped = env
         self.learner_device = device
+        self._normalized_actions = action_transform == "normalized_joint_limits"
+        if self._normalized_actions:
+            lower, upper = action_bounds(env)
+            self.action_bias = (lower + upper) / 2
+            self.action_scale = (upper - lower) / 2
 
     def __getattr__(self, name):
         return getattr(self.unwrapped, name)
@@ -257,7 +272,21 @@ class AgentEnvironment:
         return self.unwrapped.get_observations()
 
     def step(self, actions):
-        obs, rewards, dones, extras = self.unwrapped.step(actions)
+        return self._transfer(self.unwrapped.step(self._env_actions(actions)))
+
+    def step_async(self, actions):
+        self.unwrapped.step_async(self._env_actions(actions))
+
+    def _env_actions(self, actions):
+        if self._normalized_actions:
+            return actions * self.action_scale.to(actions.device) + self.action_bias.to(actions.device)
+        return actions
+
+    def step_wait(self):
+        return self._transfer(self.unwrapped.step_wait())
+
+    def _transfer(self, result):
+        obs, rewards, dones, extras = result
         if "time_outs_obs" in extras:
             extras = {**extras, "time_outs_obs": extras["time_outs_obs"].to(self.learner_device)}
         return obs, rewards, dones, extras
@@ -268,10 +297,16 @@ def override_learning_rate(algorithm, value):
     for name, optimizer in vars(algorithm).items():
         if isinstance(optimizer, torch.optim.Optimizer) and name.endswith("optimizer"):
             rate_name = name.removesuffix("optimizer") + "learning_rate"
-            if hasattr(algorithm, rate_name):
+            descriptor = getattr(type(algorithm), rate_name, None)
+            if hasattr(algorithm, rate_name) and not (isinstance(descriptor, property) and descriptor.fset is None):
                 setattr(algorithm, rate_name, value)
             for group in optimizer.param_groups:
                 group["lr"] = value
+                if "initial_lr" in group:
+                    group["initial_lr"] = value
+            scheduler = getattr(algorithm, name.removesuffix("optimizer") + "scheduler", None)
+            if scheduler is not None and hasattr(scheduler, "base_lrs"):
+                scheduler.base_lrs = [value] * len(optimizer.param_groups)
 
 
 class AgentCheckpointMixin:
@@ -287,7 +322,7 @@ class AgentCheckpointMixin:
             "training_state": self.env.training_state_dict(),
             "next_iteration": self.current_learning_iteration + 1,
         }
-        if self.agent_spec.get("action_transform") == "joint_limits":
+        if self.agent_spec.get("action_transform") in ("joint_limits", "normalized_joint_limits"):
             state["action_bounds"] = [value.tolist() for value in action_bounds(self.env)]
         for key in self.agent_spec.get("checkpoint_counters", []):
             state[key] = getattr(self.alg, key)
@@ -307,7 +342,7 @@ class AgentCheckpointMixin:
             raise ValueError("Checkpoint agent definition does not match the configured agent")
         if any(state.get("contract", {}).get(key) != value for key, value in policy_contract(self.env).items()):
             raise ValueError("Checkpoint policy contract does not match this robot/configuration")
-        if self.agent_spec.get("action_transform") == "joint_limits":
+        if self.agent_spec.get("action_transform") in ("joint_limits", "normalized_joint_limits"):
             if state.get("action_bounds") != [value.tolist() for value in action_bounds(self.env)]:
                 raise ValueError("Checkpoint action bounds do not match this robot/configuration")
         del checkpoint
@@ -331,9 +366,16 @@ def create_agent(env, cfg, log_dir=None, device="cpu"):
     validate_config(env, config)
     spec = config["agent"]
     env.capture_terminal_observations = spec["kind"] == "off_policy"
+    bases = (AgentCheckpointMixin, classes["runner_class"])
+    if spec["kind"] == "off_policy":
+        from .off_policy_runner import OffPolicyRunnerMixin
+
+        bases = (AgentCheckpointMixin, OffPolicyRunnerMixin, classes["runner_class"])
+        if config.get("collector_mode", "serial") == "process" and not callable(getattr(env, "step_async", None)):
+            raise ValueError("Create the process environment with make_env(..., train_cfg=train_cfg)")
     runner_type = type(
         "LeggedAgentRunner",
-        (AgentCheckpointMixin, classes["runner_class"]),
+        bases,
         {"algorithm_name": cfg.runner.algorithm, "agent_spec": deepcopy(spec)},
     )
-    return runner_type(AgentEnvironment(env, device), config, log_dir, device=device)
+    return runner_type(AgentEnvironment(env, device, spec.get("action_transform")), config, log_dir, device=device)

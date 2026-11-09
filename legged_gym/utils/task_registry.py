@@ -10,7 +10,7 @@ from pathlib import Path
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
 
-from .agent_factory import create_agent, override_learning_rate, policy_contract
+from .agent_factory import agent_spec, create_agent, override_learning_rate, policy_contract
 from .helpers import (
     class_to_dict,
     get_args,
@@ -60,14 +60,34 @@ class TaskRegistry:
         env_cfg.seed = train_cfg.seed
         return env_cfg, train_cfg
 
-    def make_env(self, name, args=None, env_cfg=None):
+    def make_env(self, name, args=None, env_cfg=None, train_cfg=None):
         args = get_args() if args is None else args
         if env_cfg is None:
-            env_cfg, _ = self.get_cfgs(name, args)
+            env_cfg, resolved_train_cfg = self.get_cfgs(name, args)
+            train_cfg = train_cfg or resolved_train_cfg
         else:
             env_cfg = deepcopy(env_cfg)
             update_cfg_from_args(env_cfg, None, args)
         env_cfg.seed = set_seed(env_cfg.seed)
+        if train_cfg is None:
+            _, train_cfg = self.get_cfgs(name, args)
+        else:
+            train_cfg = deepcopy(train_cfg)
+            update_cfg_from_args(None, train_cfg, args)
+        if (
+            not getattr(args, "play", False)
+            and agent_spec(train_cfg)["kind"] == "off_policy"
+            and train_cfg.off_policy.collector_mode == "process"
+        ):
+            from .collector import EnvironmentFactory, ProcessEnvironment
+
+            if getattr(args, "sim_device", "cpu") != "cpu" or getattr(args, "physics_engine", "mujoco") != "mujoco":
+                raise ValueError("Process collection requires CPU MuJoCo")
+            timeout = train_cfg.off_policy.collector_timeout
+            if not isinstance(timeout, (int, float)) or not 0 < timeout < float("inf"):
+                raise ValueError("collector_timeout must be finite and positive")
+            env = ProcessEnvironment(EnvironmentFactory(self.get_task_class(name), env_cfg), timeout=timeout)
+            return env, env_cfg
         env = self.get_task_class(name)(
             cfg=env_cfg,
             physics_engine=getattr(args, "physics_engine", "mujoco"),
@@ -86,6 +106,8 @@ class TaskRegistry:
             train_cfg = deepcopy(train_cfg)
             update_cfg_from_args(None, train_cfg, args)
         train_cfg.seed = env.cfg.seed
+        if getattr(args, "play", False):
+            train_cfg.off_policy.collector_mode = "serial"
         device = resolve_rl_device(getattr(args, "rl_device", "auto"))
         if log_root == "default":
             log_root = Path(LEGGED_GYM_ROOT_DIR) / "logs" / train_cfg.runner.experiment_name

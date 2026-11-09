@@ -13,12 +13,14 @@ from legged_gym.utils.agent_factory import agent_parameters, check_backend
 def train(args):
     env_cfg, train_cfg = task_registry.get_cfgs(args.task, args)
     check_backend(train_cfg)  # Fail before allocating simulation if the backend is unavailable.
-    env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
+    env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg, train_cfg=train_cfg)
     monitor = None
     try:
         runner, cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
         algorithm = cfg.runner.algorithm.upper()
         print(f"MuJoCo CPU: {env.num_envs} envs / {env.sim.batch.nthread} workers; {algorithm}: {runner.device}")
+        if runner.agent_spec["kind"] == "off_policy":
+            print(f"Collector: {cfg.off_policy.collector_mode}")
         parameters = agent_parameters(cfg)
         fields = ["max_grad_norm", "desired_kl", "replay_buffer_size", "mini_batch_size"]
         fields += runner.agent_spec["learning_rate_fields"]
