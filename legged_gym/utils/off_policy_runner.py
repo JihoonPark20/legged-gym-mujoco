@@ -5,8 +5,10 @@ Adapters isolate collection state so update() can run while physics is pending.
 """
 
 import inspect
+import math
 import os
 import time
+from contextlib import ExitStack
 
 import torch
 
@@ -45,6 +47,103 @@ class FlashSACAdapter(ReplayAdapter):
     Use the normalized_joint_limits agent transform for FlashSAC's [-1, 1]
     replay actions. The environment wrapper applies the affine map for physics.
     """
+
+    schedule_fields = (
+        "learning_rate_init",
+        "learning_rate_peak",
+        "learning_rate_end",
+        "learning_rate_warmup_steps",
+        "learning_rate_decay_steps",
+    )
+
+    @staticmethod
+    def prepare_config(cfg, spec):
+        parameters = getattr(cfg, spec["parameter_group"])
+        if parameters.learning_rate_decay_steps is None:
+            parameters.learning_rate_decay_steps = (
+                cfg.runner.max_iterations * parameters.num_learning_epochs * parameters.num_mini_batches
+            )
+
+    @staticmethod
+    def model_config(cfg, spec):
+        from .helpers import class_to_dict
+
+        policy = getattr(cfg, spec["parameter_group"] + "_policy")
+        return class_to_dict(policy.actor), class_to_dict(policy.critic)
+
+    @classmethod
+    def validate_config(cls, env, cfg):
+        alg = cfg["algorithm"]
+        for key in (
+            "replay_buffer_size",
+            "buffer_min_length",
+            "mini_batch_size",
+            "num_learning_epochs",
+            "num_mini_batches",
+            "n_steps",
+            "learning_rate_decay_steps",
+        ):
+            if type(alg[key]) is not int or alg[key] <= 0:
+                raise ValueError(f"FlashSAC {key} must be a positive integer")
+        if alg["buffer_min_length"] > alg["replay_buffer_size"]:
+            raise ValueError("FlashSAC buffer_min_length must not exceed replay_buffer_size")
+        if alg.get("buffer_optimize_memory_usage", True):
+            if alg["replay_buffer_size"] <= alg["n_steps"] * env.num_envs:
+                raise ValueError("FlashSAC memory-efficient replay requires replay_buffer_size > n_steps * num_envs")
+        elif alg["replay_buffer_size"] < env.num_envs:
+            raise ValueError("FlashSAC replay_buffer_size must be at least num_envs")
+        warmup = alg["learning_rate_warmup_steps"]
+        if type(warmup) is not int or not 0 <= warmup < alg["learning_rate_decay_steps"]:
+            raise ValueError("FlashSAC LR warmup must be nonnegative and shorter than LR decay")
+        for key in cls.schedule_fields[:3]:
+            value = alg[key]
+            if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"FlashSAC {key} must be finite and positive")
+        for name in ("actor", "critic"):
+            if any(key in cfg[name] for key in ("hidden_dims", "activation", "obs_normalization")):
+                raise ValueError("FlashSAC models use flashsac_policy settings, not the common MLP policy options")
+            for key in ("hidden_dim", "num_blocks"):
+                if type(cfg[name][key]) is not int or cfg[name][key] <= 0:
+                    raise ValueError(f"FlashSAC {name}.{key} must be a positive integer")
+        if cfg["actor"]["log_std_min"] >= cfg["actor"]["log_std_max"]:
+            raise ValueError("FlashSAC actor log_std_min must be smaller than log_std_max")
+        critic = cfg["critic"]
+        if type(critic["num_bins"]) is not int or critic["num_bins"] < 2 or critic["min_v"] >= critic["max_v"]:
+            raise ValueError("FlashSAC critic requires at least two bins and min_v < max_v")
+        if type(critic["num_qs"]) is not int or critic["num_qs"] < 1:
+            raise ValueError("FlashSAC critic.num_qs must be positive")
+
+    @classmethod
+    def checkpoint_state(cls, cfg):
+        return {key: cfg["algorithm"][key] for key in cls.schedule_fields}
+
+    @classmethod
+    def legacy_checkpoint_state(cls, snapshot, cfg):
+        train = snapshot["train"]
+        parameters = train[cfg["agent"]["parameter_group"]]
+        result = {key: parameters.get(key, cfg["algorithm"][key]) for key in cls.schedule_fields}
+        result["learning_rate_decay_steps"] = parameters.get("learning_rate_decay_steps") or (
+            train["runner"]["max_iterations"] * parameters["num_learning_epochs"] * parameters["num_mini_batches"]
+        )
+        return result
+
+    @classmethod
+    def restore_state(cls, algorithm, cfg, state):
+        from .agent_factory import resolve_class
+
+        schedule = resolve_class("rsl_rl_flashsac.utils.lr_scheduler:warmup_cosine_decay_scheduler")(
+            init_value=state["learning_rate_init"],
+            peak_value=state["learning_rate_peak"],
+            end_value=state["learning_rate_end"],
+            warmup_steps=state["learning_rate_warmup_steps"],
+            decay_steps=state["learning_rate_decay_steps"],
+        )
+        # LambdaLR state_dict does not serialize these functions. Restore them
+        # before the backend loads scheduler counters and optimizer state.
+        for name in ("actor", "critic", "temperature"):
+            scheduler = getattr(algorithm, name + "_scheduler")
+            scheduler.lr_lambdas = [lambda step: schedule(step) / state["learning_rate_peak"]] * len(scheduler.base_lrs)
+        cfg["algorithm"].update(state)
 
     def validate(self, algorithm):
         for name in (
@@ -95,6 +194,12 @@ class OffPolicyRunnerMixin:
         if self.is_distributed:
             raise NotImplementedError("Process collection currently supports a single learner rank")
         from .agent_factory import resolve_class
+        from .off_policy_profile import OffPolicyProfiler
+        from .replay_sampling import sampling_session
+
+        self.profiler = OffPolicyProfiler(self.cfg.get("profile", "off"), self.device)
+        profiler = self.profiler
+        resources = ExitStack()
 
         adapter_class = self.cfg["agent"].get("execution_adapter", "legged_gym.utils.off_policy_runner:ReplayAdapter")
         adapter = resolve_class(adapter_class)()
@@ -118,6 +223,7 @@ class OffPolicyRunnerMixin:
             save_interval = max(1, num_learning_iterations // 10)
         try:
             self.logger.init_logging_writer()
+            resources.enter_context(sampling_session(self.alg, self.cfg.get("replay_sampling", "native"), profiler))
             for it in range(start_it, total_it):
                 start = time.perf_counter()
                 update_time = 0.0
@@ -125,40 +231,54 @@ class OffPolicyRunnerMixin:
                 loss_dict = {}
                 for step in range(self.cfg["num_steps_per_env"]):
                     with torch.no_grad():
-                        actions = adapter.act(self.alg, obs)
-                        self.env.step_async(actions.to(self.env.device))
+                        with profiler.measure("inference"):
+                            actions = adapter.act(self.alg, obs)
+                        with profiler.measure("action_transfer"):
+                            env_actions = actions.to(self.env.device)
+                        with profiler.measure("dispatch"):
+                            self.env.step_async(env_actions)
                     if (
                         step == self.cfg["num_steps_per_env"] - 1
                         and it > self.start_training
                         and adapter.ready(self.alg)
                     ):
                         before = time.perf_counter()
-                        loss_dict = self.alg.update()
+                        with profiler.measure("update"):
+                            loss_dict = self.alg.update()
                         update_time += time.perf_counter() - before
                         updated = True
                     with torch.no_grad():
-                        next_obs, rewards, dones, extras = self.env.step_wait()
+                        with profiler.measure("receive"):
+                            next_obs, rewards, dones, extras = self.env.step_wait()
+                        if profiler.enabled:
+                            for key, value in self.env.last_step_metrics.items():
+                                profiler.totals[key] += value
                         if self.cfg.get("check_for_nan", True):
                             if (
                                 not all(torch.isfinite(v).all() for v in next_obs.values())
                                 or not torch.isfinite(rewards).all()
                             ):
                                 raise FloatingPointError("Nonfinite collector observation/reward")
-                        next_obs, rewards, dones = (
-                            next_obs.to(self.device),
-                            rewards.to(self.device),
-                            dones.to(self.device),
-                        )
-                        adapter.observe(self.alg, obs, actions, next_obs, rewards, dones, extras)
+                        with profiler.measure("observation_transfer"):
+                            next_obs, rewards, dones = (
+                                next_obs.to(self.device),
+                                rewards.to(self.device),
+                                dones.to(self.device),
+                            )
+                        with profiler.measure("replay_insert"):
+                            adapter.observe(self.alg, obs, actions, next_obs, rewards, dones, extras)
                         self.logger.process_env_step(
                             rewards, dones, extras, getattr(self.alg, "intrinsic_rewards", None)
                         )
                         obs = next_obs
                 if it >= self.start_training and not updated:
                     before = time.perf_counter()
-                    loss_dict = self.alg.update()
+                    with profiler.measure("update"):
+                        loss_dict = self.alg.update()
                     update_time += time.perf_counter() - before
                 elapsed = time.perf_counter() - start
+                if profiler.enabled:
+                    profiler.totals["iteration"] += elapsed
                 # The sum remains elapsed wall time, not CPU time + overlapping GPU time.
                 window_collect += max(0.0, elapsed - update_time)
                 window_learn += update_time
@@ -176,6 +296,7 @@ class OffPolicyRunnerMixin:
                         log_parameters,
                         adapter.learning_rate(self.alg),
                     )
+                    profiler.record(it, window_iters, self.logger)
                     window_collect = window_learn = 0.0
                     window_iters = 0
                 if self.logger.writer is not None and it % save_interval == 0 and it != 0:
@@ -189,6 +310,8 @@ class OffPolicyRunnerMixin:
             raise
         else:
             self.logger.stop_logging_writer()
+        finally:
+            resources.close()
 
     def _log_overlap_window(self, it, start_it, total_it, collect, learn, count, losses, parameters, learning_rate):
         rnd = getattr(self.alg, "rnd", None)
@@ -210,10 +333,11 @@ class OffPolicyRunnerMixin:
             kwargs["collection_size_override"] = size * count
         else:
             kwargs["collect_time"], kwargs["learn_time"] = collect / count, learn / count
+            if self.logger.writer is not None:
+                # Include skipped iterations before the logger prints/writes its totals.
+                self.logger.tot_timesteps += size * (count - 1)
+                self.logger.tot_time += (collect + learn) * (1 - 1 / count)
         self.logger.log(**kwargs)
-        if "collection_size_override" not in parameters and self.logger.writer is not None:
-            self.logger.tot_timesteps += size * (count - 1)
-            self.logger.tot_time += (collect + learn) * (1 - 1 / count)
         if self.logger.writer is not None and callable(getattr(self, "_elapsed_wall_time", None)):
             self.logger.writer.add_scalar("Policy/temperature", self.alg.alpha, it)
             self.logger.writer.add_scalar("Train/env_steps", self.logger.tot_timesteps, it)

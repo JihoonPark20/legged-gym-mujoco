@@ -194,6 +194,7 @@ class LeggedRobotCfgPPO(BaseConfig):
         save_interval = 100
 
     class policy:
+        # PPO/SAC MLP settings. FlashSAC uses flashsac_policy below.
         activation = "elu"
         actor_hidden_dims = [512, 256, 128]
         critic_hidden_dims = [512, 256, 128]
@@ -242,13 +243,34 @@ class LeggedRobotCfgPPO(BaseConfig):
         learning_rate_init = 0.0003
         learning_rate_peak = 0.0003
         learning_rate_end = 0.00015
+        learning_rate_warmup_steps = 0
+        learning_rate_decay_steps = None  # Resolved once and preserved across resume.
+        buffer_optimize_memory_usage = True
         n_steps = 1
         use_compile = False
         use_amp = False
 
+    class flashsac_policy:
+        class actor:
+            hidden_dim = 128
+            num_blocks = 2
+            log_std_min = -10.0
+            log_std_max = 2.0
+
+        class critic:
+            hidden_dim = 256
+            num_blocks = 2
+            num_bins = 101
+            min_v = -5.0
+            max_v = 5.0
+            num_qs = 2
+
     class off_policy:
-        collector_mode = "serial"  # process overlaps CPU physics with learner updates.
+        collector_mode = "auto"  # Supported accelerator learners overlap CPU physics in a process.
+        collector_transport = "shared_memory"  # socket remains available for comparison.
         collector_timeout = 120.0
+        replay_sampling = "auto"  # Reuse sample buffers for supported eager process backends.
+        profile = "off"  # process mode: wall, or synchronized for device attribution.
         num_steps_per_env = 1
         start_training = 100  # Collection iterations before updates; also after resume.
         log_interval = 20

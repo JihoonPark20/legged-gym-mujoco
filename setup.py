@@ -39,6 +39,10 @@ setup(
         "sac": [
             "rsl-rl-lib @ git+https://github.com/leggedrobotics/rsl_rl_sac.git@e0d243aa6d3f8a7231783b7f3cefeaec1b4a5521"
         ],
+        "flashsac": [
+            "rsl-rl-lib==5.5.2",
+            "rsl-rl-flashsac @ git+https://github.com/Holiday-Robot/rsl_rl_flashsac.git@9822b1b7e0b5cce45e7f79d6b3e2c169fa042faa",
+        ],
     },
     entry_points={
         "console_scripts": [

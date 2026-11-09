@@ -20,7 +20,7 @@ def train(args):
         algorithm = cfg.runner.algorithm.upper()
         print(f"MuJoCo CPU: {env.num_envs} envs / {env.sim.batch.nthread} workers; {algorithm}: {runner.device}")
         if runner.agent_spec["kind"] == "off_policy":
-            print(f"Collector: {cfg.off_policy.collector_mode}")
+            print(f"Collector: {cfg.off_policy.collector_mode}; replay sampling: {cfg.off_policy.replay_sampling}")
         parameters = agent_parameters(cfg)
         fields = ["max_grad_norm", "desired_kl", "replay_buffer_size", "mini_batch_size"]
         fields += runner.agent_spec["learning_rate_fields"]

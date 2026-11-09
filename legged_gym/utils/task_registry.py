@@ -10,7 +10,14 @@ from pathlib import Path
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
 
-from .agent_factory import agent_spec, create_agent, override_learning_rate, policy_contract
+from .agent_factory import (
+    agent_spec,
+    create_agent,
+    override_learning_rate,
+    policy_contract,
+    prepare_training_config,
+    resolve_execution_config,
+)
 from .helpers import (
     class_to_dict,
     get_args,
@@ -54,6 +61,9 @@ class TaskRegistry:
                     raise ValueError("Checkpoint snapshot belongs to a different robot/configuration")
                 update_class_from_dict(env_cfg, snapshot["env"], strict=False)
                 update_class_from_dict(train_cfg, snapshot["train"], strict=False)
+                # Resolve legacy schedules using the original run length, before
+                # CLI max_iterations is applied as the additional resume length.
+                prepare_training_config(train_cfg)
                 train_cfg.runner.experiment_name = name
         if args is not None:
             update_cfg_from_args(env_cfg, train_cfg, args)
@@ -74,6 +84,11 @@ class TaskRegistry:
         else:
             train_cfg = deepcopy(train_cfg)
             update_cfg_from_args(None, train_cfg, args)
+        resolve_execution_config(
+            train_cfg,
+            resolve_rl_device(getattr(args, "rl_device", "auto")),
+            playback=getattr(args, "play", False),
+        )
         if (
             not getattr(args, "play", False)
             and agent_spec(train_cfg)["kind"] == "off_policy"
@@ -86,7 +101,12 @@ class TaskRegistry:
             timeout = train_cfg.off_policy.collector_timeout
             if not isinstance(timeout, (int, float)) or not 0 < timeout < float("inf"):
                 raise ValueError("collector_timeout must be finite and positive")
-            env = ProcessEnvironment(EnvironmentFactory(self.get_task_class(name), env_cfg), timeout=timeout)
+            env = ProcessEnvironment(
+                EnvironmentFactory(self.get_task_class(name), env_cfg),
+                timeout=timeout,
+                transport=train_cfg.off_policy.collector_transport,
+                profiling=train_cfg.off_policy.profile != "off",
+            )
             return env, env_cfg
         env = self.get_task_class(name)(
             cfg=env_cfg,
@@ -108,6 +128,9 @@ class TaskRegistry:
         train_cfg.seed = env.cfg.seed
         if getattr(args, "play", False):
             train_cfg.off_policy.collector_mode = "serial"
+            train_cfg.off_policy.replay_sampling = "native"
+            train_cfg.off_policy.profile = "off"
+        prepare_training_config(train_cfg)
         device = resolve_rl_device(getattr(args, "rl_device", "auto"))
         if log_root == "default":
             log_root = Path(LEGGED_GYM_ROOT_DIR) / "logs" / train_cfg.runner.experiment_name
@@ -119,6 +142,33 @@ class TaskRegistry:
             directory = Path(log_root) / run_name
             directory.mkdir(parents=True, exist_ok=False)
             log_dir = str(directory)
+        runner = create_agent(env, train_cfg, log_dir, device=device)
+        if runner.agent_spec["kind"] == "off_policy":
+            # Persist and display the effective choices, including backend fallbacks.
+            train_cfg.off_policy.collector_mode = runner.cfg["collector_mode"]
+            train_cfg.off_policy.replay_sampling = runner.cfg["replay_sampling"]
+        if getattr(args, "resume", False) or getattr(args, "checkpoint_path", None):
+            path = getattr(args, "checkpoint_path", None)
+            if path is None:
+                raise ValueError("Resolve the resume checkpoint through get_cfgs before constructing the runner")
+            runner.load(path, restore_env=not getattr(args, "play", False))
+            # Loading Adam restores its saved LR. An explicit CLI override must
+            # update both Adam and PPO's adaptive scheduler after that restore.
+            learning_rate = getattr(args, "learning_rate", None)
+            if learning_rate is not None:
+                override_learning_rate(runner.alg, learning_rate)
+                adapter = runner._execution_adapter()
+                if adapter is not None and hasattr(adapter, "restore_state") and hasattr(adapter, "schedule_fields"):
+                    schedule = adapter.checkpoint_state(runner.cfg)
+                    for key in ("learning_rate_init", "learning_rate_peak", "learning_rate_end"):
+                        schedule[key] = learning_rate
+                    adapter.restore_state(runner.alg, runner.cfg, schedule)
+        adapter = runner._execution_adapter()
+        if adapter is not None and hasattr(adapter, "checkpoint_state"):
+            parameters = getattr(train_cfg, runner.agent_spec["parameter_group"])
+            for key, value in adapter.checkpoint_state(runner.cfg).items():
+                setattr(parameters, key, value)
+        if log_dir is not None:
             (directory / "run_config.json").write_text(
                 json.dumps(
                     {
@@ -133,17 +183,6 @@ class TaskRegistry:
                 )
                 + "\n"
             )
-        runner = create_agent(env, train_cfg, log_dir, device=device)
-        if getattr(args, "resume", False) or getattr(args, "checkpoint_path", None):
-            path = getattr(args, "checkpoint_path", None)
-            if path is None:
-                raise ValueError("Resolve the resume checkpoint through get_cfgs before constructing the runner")
-            runner.load(path, restore_env=not getattr(args, "play", False))
-            # Loading Adam restores its saved LR. An explicit CLI override must
-            # update both Adam and PPO's adaptive scheduler after that restore.
-            learning_rate = getattr(args, "learning_rate", None)
-            if learning_rate is not None:
-                override_learning_rate(runner.alg, learning_rate)
         return runner, train_cfg
 
 

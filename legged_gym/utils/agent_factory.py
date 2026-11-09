@@ -8,7 +8,9 @@ default constructor assumes a different simulator. Learning stays upstream.
 
 import importlib
 import inspect
+import json
 from copy import deepcopy
+from pathlib import Path
 
 import torch
 
@@ -75,6 +77,42 @@ def resolve_class(path):
     return getattr(importlib.import_module(module), name)
 
 
+def prepare_training_config(cfg):
+    """Resolve backend-derived settings before saving the run configuration."""
+    spec = agent_spec(cfg)
+    adapter = resolve_class(spec["execution_adapter"]) if "execution_adapter" in spec else None
+    if adapter is not None and hasattr(adapter, "prepare_config"):
+        adapter.prepare_config(cfg, spec)
+
+
+def resolve_execution_config(cfg, device, *, env=None, playback=False):
+    """Resolve execution defaults without changing the algorithm's learning settings."""
+    spec = agent_spec(cfg)
+    if spec["kind"] != "off_policy":
+        return
+    execution = cfg.off_policy
+    if playback:
+        execution.collector_mode = "serial"
+        execution.replay_sampling = "native"
+        execution.profile = "off"
+        return
+    if execution.collector_mode == "auto":
+        supported = spec["algorithm_class"] in (
+            "rsl_rl.algorithms:SAC",
+            "rsl_rl_flashsac.algorithms:FlashSAC",
+        )
+        # An already constructed environment determines what this runner can do.
+        # This preserves callers that supply a serial environment directly.
+        use_process = (
+            callable(getattr(env, "step_async", None))
+            if env is not None
+            else supported and torch.device(device).type in ("mps", "cuda")
+        )
+        execution.collector_mode = "process" if use_process else "serial"
+    if execution.replay_sampling == "auto" and execution.collector_mode == "serial":
+        execution.replay_sampling = "native"
+
+
 def check_backend(cfg):
     """Resolve the configured classes before allocating simulation or replay."""
     spec = agent_spec(cfg)
@@ -98,6 +136,7 @@ def model_api():
 
 
 def runner_config(cfg):
+    prepare_training_config(cfg)
     spec = agent_spec(cfg)
     policy = class_to_dict(cfg.policy)
     actor = {
@@ -112,6 +151,11 @@ def runner_config(cfg):
         "activation": policy["activation"],
         "obs_normalization": policy["obs_normalization"],
     }
+    adapter = resolve_class(spec["execution_adapter"]) if "execution_adapter" in spec else None
+    if adapter is not None and hasattr(adapter, "model_config"):
+        actor_options, critic_options = adapter.model_config(cfg, spec)
+        actor = {"class_name": spec["actor_class"], **actor_options}
+        critic = {"class_name": spec["critic_class"], **critic_options}
     distribution = spec.get("distribution")
     if distribution == "gaussian":
         actor_class = resolve_class(spec["actor_class"])
@@ -180,6 +224,17 @@ def validate_config(env, cfg):
         return
     if cfg.get("collector_mode", "serial") not in ("serial", "process"):
         raise ValueError("collector_mode must be serial or process")
+    for name, values in (
+        ("collector_transport", ("shared_memory", "socket")),
+        ("replay_sampling", ("native", "reusable", "auto")),
+        ("profile", ("off", "wall", "synchronized")),
+    ):
+        if cfg.get(name, values[0]) not in values:
+            raise ValueError(f"Invalid off-policy {name}")
+    if cfg.get("collector_mode", "serial") != "process" and (
+        cfg.get("replay_sampling", "native") != "native" or cfg.get("profile", "off") != "off"
+    ):
+        raise ValueError("Replay sampling overrides and profiling require collector_mode=process")
     timeout = cfg.get("collector_timeout", 120.0)
     if not isinstance(timeout, (int, float)) or not 0 < timeout < float("inf"):
         raise ValueError("collector_timeout must be finite and positive")
@@ -188,6 +243,9 @@ def validate_config(env, cfg):
             raise ValueError(f"Off-policy {key} must be a positive integer")
     if not isinstance(cfg["start_training"], int) or cfg["start_training"] < 0:
         raise ValueError("Off-policy start_training must be a nonnegative integer")
+    adapter = resolve_class(spec["execution_adapter"]) if "execution_adapter" in spec else None
+    if adapter is not None and hasattr(adapter, "validate_config"):
+        adapter.validate_config(env, cfg)
     if spec["construction"] != "actor_critic_replay":
         return
     alg = cfg["algorithm"]
@@ -326,6 +384,9 @@ class AgentCheckpointMixin:
             state["action_bounds"] = [value.tolist() for value in action_bounds(self.env)]
         for key in self.agent_spec.get("checkpoint_counters", []):
             state[key] = getattr(self.alg, key)
+        adapter = self._execution_adapter()
+        if adapter is not None and hasattr(adapter, "checkpoint_state"):
+            state["execution_state"] = adapter.checkpoint_state(self.cfg)
         metadata["legged_gym"] = state
         super().save(path, metadata)
 
@@ -346,6 +407,17 @@ class AgentCheckpointMixin:
             if state.get("action_bounds") != [value.tolist() for value in action_bounds(self.env)]:
                 raise ValueError("Checkpoint action bounds do not match this robot/configuration")
         del checkpoint
+        adapter = self._execution_adapter()
+        if restore_env and adapter is not None and hasattr(adapter, "restore_state"):
+            execution_state = state.get("execution_state")
+            snapshot_path = Path(path).parent / "run_config.json"
+            if execution_state is None and snapshot_path.is_file() and hasattr(adapter, "legacy_checkpoint_state"):
+                execution_state = adapter.legacy_checkpoint_state(json.loads(snapshot_path.read_text()), self.cfg)
+            if execution_state is None:
+                raise ValueError(
+                    "Checkpoint execution state is missing; legacy resume requires the original run_config.json"
+                )
+            adapter.restore_state(self.alg, self.cfg, execution_state)
         # State dict loading moves model/optimizer tensors onto the learner device.
         infos = super().load(path, load_cfg, strict, map_location or "cpu")
         if restore_env:
@@ -358,9 +430,15 @@ class AgentCheckpointMixin:
                 self.start_training = self.current_learning_iteration + self.cfg["start_training"]
         return infos
 
+    def _execution_adapter(self):
+        path = self.agent_spec.get("execution_adapter")
+        return resolve_class(path) if path is not None else None
+
 
 def create_agent(env, cfg, log_dir=None, device="cpu"):
     """Construct either policy family through the same environment/runner boundary."""
+    cfg = deepcopy(cfg)
+    resolve_execution_config(cfg, device, env=env)
     classes = check_backend(cfg)
     config = runner_config(cfg)
     validate_config(env, config)
@@ -378,4 +456,9 @@ def create_agent(env, cfg, log_dir=None, device="cpu"):
         bases,
         {"algorithm_name": cfg.runner.algorithm, "agent_spec": deepcopy(spec)},
     )
-    return runner_type(AgentEnvironment(env, device, spec.get("action_transform")), config, log_dir, device=device)
+    runner = runner_type(AgentEnvironment(env, device, spec.get("action_transform")), config, log_dir, device=device)
+    if spec["kind"] == "off_policy":
+        from .replay_sampling import resolve_sampling_mode
+
+        runner.cfg["replay_sampling"] = resolve_sampling_mode(runner.alg, config["replay_sampling"])
+    return runner
