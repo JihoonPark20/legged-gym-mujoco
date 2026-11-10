@@ -31,6 +31,16 @@ class LeggedRobot(VecEnv):
         self.max_episode_length = math.ceil(cfg.env.episode_length_s / self.dt)
         self.rng = np.random.default_rng(cfg.seed)
         self.sim = MujocoBatch(cfg, self.rng)
+        self.terrain = self.sim.terrain
+        self.terrain_levels = np.zeros(self.num_envs, dtype=int)
+        self.terrain_types = np.zeros(self.num_envs, dtype=int)
+        self.env_origins = np.zeros((self.num_envs, 3))
+        self._episode_start_xy = np.zeros((self.num_envs, 2))
+        self._commanded_distance = np.zeros(self.num_envs)
+        if self.terrain.rough:
+            self.terrain_levels[:] = self.rng.integers(0, cfg.terrain.max_init_terrain_level + 1, self.num_envs)
+            self.terrain_types[:] = np.arange(self.num_envs) % len(cfg.terrain.types)
+            self.env_origins[:] = self.terrain.origins[self.terrain_levels, self.terrain_types]
         self.dof_names = list(cfg.asset.joint_names)
         if len(self.dof_names) != self.num_actions or len(set(self.dof_names)) != self.num_actions:
             raise ValueError("Provide one unique joint name per action")
@@ -90,7 +100,7 @@ class LeggedRobot(VecEnv):
         }
         self._liftoff_count = np.zeros(self.num_envs)
         self.rew_buf = np.zeros(self.num_envs)
-        policy_width = 11 + 3 * self.num_actions
+        policy_width = 11 + 3 * self.num_actions + len(self.terrain.scan_points)
         self._critic_obs_work = np.empty((self.num_envs, policy_width + 3 + 6 * feet_shape[1]))
         self._policy_obs_work = np.empty((self.num_envs, policy_width))
         self._obs_noise_scale = np.zeros(policy_width)
@@ -169,10 +179,22 @@ class LeggedRobot(VecEnv):
             },
             "Diagnostics/foot_liftoffs_per_second": float((self._liftoff_count[ids] / (steps * self.dt)).mean()),
             "Curriculum/max_command_x": float(self.command_ranges[0, 1]),
+            **(
+                {
+                    "Curriculum/terrain_level": float(self.terrain_levels.mean()),
+                    "Episode/terrain_boundary_fraction": float(self._terrain_boundary[ids].mean()),
+                }
+                if self.terrain.rough
+                else {}
+            ),
         }
 
     def training_state_dict(self):
-        return {"command_ranges": self.command_ranges.tolist(), "common_step_counter": self.common_step_counter}
+        state = {"command_ranges": self.command_ranges.tolist(), "common_step_counter": self.common_step_counter}
+        if self.terrain.rough:
+            state["terrain_levels"] = self.terrain_levels.tolist()
+            state["terrain_types"] = self.terrain_types.tolist()
+        return state
 
     def load_training_state_dict(self, state):
         ranges = np.asarray(state["command_ranges"], dtype=float)
@@ -180,6 +202,24 @@ class LeggedRobot(VecEnv):
             raise ValueError("Invalid command curriculum state")
         self.command_ranges[:] = ranges
         self.common_step_counter = int(state["common_step_counter"])
+        if self.terrain.rough:
+            levels, types = np.asarray(state.get("terrain_levels")), np.asarray(state.get("terrain_types"))
+            if (
+                levels.ndim != 1
+                or not levels.size
+                or types.shape != levels.shape
+                or not np.issubdtype(levels.dtype, np.integer)
+                or not np.issubdtype(types.dtype, np.integer)
+                or np.any((levels < 0) | (levels >= self.cfg.terrain.num_rows))
+                or np.any((types < 0) | (types >= len(self.cfg.terrain.types)))
+            ):
+                raise ValueError("Invalid terrain curriculum state")
+            indices = np.arange(self.num_envs) % len(levels)
+            self.terrain_levels[:] = levels[indices]
+            self.terrain_types[:] = types[indices]
+            self.reset_idx(np.arange(self.num_envs), update_curriculum=False)
+            self.sim.forward()
+            self._refresh_state()
         self._resample_commands(np.arange(self.num_envs))
         self._update_commands()
         self.compute_observations()
@@ -224,6 +264,8 @@ class LeggedRobot(VecEnv):
             self._update_contacts()
         self.episode_length_buf += 1
         self.common_step_counter += 1
+        if self.terrain.rough:
+            self._commanded_distance += np.linalg.norm(self.commands[:, :2], axis=1) * self.dt
         self._refresh_state()
         # ContactSensor.data concatenates its fields on the first reward read.
         # A reset of any environment invalidates this cache for the entire batch;
@@ -274,6 +316,10 @@ class LeggedRobot(VecEnv):
         self.feet_pos = self.sim.site_xpos[:, self.sim.site_ids].copy()
         self.feet_vel = self.sim.sensordata[:, self.sim.site_velocity_columns].copy()
         self.base_height = self.base_pos[:, 2]
+        self.feet_height = self.feet_pos[:, :, 2]
+        if self.terrain.rough:
+            self.base_height = self.base_height - self.terrain.height(self.base_pos[:, :2])
+            self.feet_height = self.feet_height - self.terrain.height(self.feet_pos[:, :, :2])
 
     def _update_contacts(self):
         contacts = self.sim.foot_contacts[:, :, 0] > 0
@@ -285,15 +331,21 @@ class LeggedRobot(VecEnv):
         self._collision_history[self._contact_cursor] = self.sim.history_contacts[:, :, 1:]
         self._contact_cursor = (self._contact_cursor + 1) % self.cfg.rewards.contact_history_length
 
-    def reset_idx(self, ids):
+    def reset_idx(self, ids, *, update_curriculum=True):
         ids = np.asarray(ids, dtype=int)
         if not ids.size:
             return
         self._foot_sensor_cache = None
         self._update_command_curriculum(ids)
+        if self.terrain.rough:
+            if update_curriculum:
+                self._update_terrain_curriculum(ids)
+            self.env_origins[ids] = self.terrain.origins[self.terrain_levels[ids], self.terrain_types[ids]]
         self.sim.reset(ids)
-        self.sim.qpos[ids, :3] = self.cfg.init_state.pos
+        self.sim.qpos[ids, :3] = self.cfg.init_state.pos + self.env_origins[ids]
         self.sim.qpos[ids, :2] += self.rng.uniform(-0.5, 0.5, (len(ids), 2))
+        self._episode_start_xy[ids] = self.sim.qpos[ids, :2]
+        self._commanded_distance[ids] = 0
         yaw = self.rng.uniform(-3.14, 3.14, len(ids))
         self.sim.qpos[ids, 3:7] = np.stack(
             (np.cos(yaw / 2), np.zeros(len(ids)), np.zeros(len(ids)), np.sin(yaw / 2)), axis=1
@@ -332,6 +384,24 @@ class LeggedRobot(VecEnv):
         self.heading_envs[ids] = self.rng.random(len(ids)) <= self.cfg.commands.heading_fraction
         self.standing_envs[ids] = self.rng.random(len(ids)) <= self.cfg.commands.standing_fraction
 
+    def _update_terrain_curriculum(self, ids):
+        # Distance curriculum inspired by mjlab terrain_levels_vel @ 936f7a12.
+        # Failed/standing episodes cannot promote, and early falls still owe
+        # the remaining commanded distance of the full episode.
+        if not self.cfg.terrain.curriculum or self.common_step_counter == 0:
+            return
+        elapsed = self.episode_length_buf.numpy()[ids] * self.dt
+        distance = np.linalg.norm(self.base_pos[ids, :2] - self._episode_start_xy[ids], axis=1)
+        required = self._commanded_distance[ids] + np.linalg.norm(self.commands[ids, :2], axis=1) * np.maximum(
+            self.cfg.env.episode_length_s - elapsed, 0
+        )
+        promote = distance > np.minimum(0.8 * required, self.cfg.terrain.terrain_length / 2 - 0.6)
+        promote &= (required >= 1.0) & ~self.terminated_buf[ids] & (elapsed > 0)
+        demote = ((distance < 0.5 * required) | self.terminated_buf[ids]) & ~promote & (elapsed > 0)
+        self.terrain_levels[ids] = np.clip(
+            self.terrain_levels[ids] + promote.astype(int) - demote.astype(int), 0, self.cfg.terrain.num_rows - 1
+        )
+
     def _update_commands(self):
         if self.cfg.commands.heading_command:
             w, x, y, z = self.base_quat.T
@@ -365,7 +435,7 @@ class LeggedRobot(VecEnv):
         self._next_push[ids] = self.rng.uniform(*self.cfg.domain_rand.push_interval_s, len(ids))
 
     def reset(self):
-        self.reset_idx(np.arange(self.num_envs))
+        self.reset_idx(np.arange(self.num_envs), update_curriculum=False)
         self.sim.forward()
         self._refresh_state()
         # CommandTerm.reset samples but does not apply heading/standing until compute.
@@ -382,6 +452,13 @@ class LeggedRobot(VecEnv):
         )
         self.terminated_buf = self._tilt_failure | self._contact_failure
         self.time_out_buf = self.episode_length_buf.numpy() >= self.max_episode_length
+        if self.terrain.rough:
+            self._terrain_boundary = np.any(
+                np.abs(self.base_pos[:, :2] - self.env_origins[:, :2]) > self.cfg.terrain.terrain_length / 2 - 0.4,
+                axis=1,
+            )
+            # Patch exits truncate the episode; they are not physical failures.
+            self.time_out_buf |= self._terrain_boundary
         self.reset_buf = self.terminated_buf | self.time_out_buf
 
     def compute_observations(self, ids=None):
@@ -404,13 +481,25 @@ class LeggedRobot(VecEnv):
         n = self.num_actions
         np.subtract(self.dof_pos, self.default_dof_pos, out=clean[:, 11 : 11 + n])
         clean[:, 11 + n : 11 + 2 * n] = self.dof_vel
-        clean[:, 11 + 2 * n :] = self.actions
+        clean[:, 11 + 2 * n : 11 + 3 * n] = self.actions
+        if self.terrain.scan_points.size:
+            w, x, y, z = self.base_quat.T
+            yaw = np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+            c, s = np.cos(yaw)[:, None], np.sin(yaw)[:, None]
+            px, py = self.terrain.scan_points.T
+            points = np.stack((c * px - s * py, s * px + c * py), axis=-1) + self.base_pos[:, None, :2]
+            clean[:, 11 + 3 * n :] = np.clip(
+                self.base_pos[:, 2, None] - self.cfg.init_state.pos[2] - self.terrain.height(points),
+                -self.cfg.terrain.height_clip,
+                self.cfg.terrain.height_clip,
+            )
         actor = clean
         if self.cfg.noise.add_noise:
             cfg = self.cfg.noise
             scale = self._obs_noise_scale
             scale[:3], scale[3:6] = cfg.ang_vel, cfg.gravity
             scale[11 : 11 + n], scale[11 + n : 11 + 2 * n] = cfg.joint_pos, cfg.joint_vel
+            scale[11 + 3 * n :] = self.cfg.terrain.height_noise
             actor = self._policy_obs_work
             self.rng.random(out=actor)
             actor *= 2
@@ -424,7 +513,7 @@ class LeggedRobot(VecEnv):
         offset = clean.shape[1]
         for values in (
             self.sim.sensor("imu_lin_vel"),
-            self.feet_pos[:, :, 2],
+            self.feet_height,
             self.feet_air_time,
             contacts[:, :, 0] > 0,
             np.sign(forces) * np.log1p(np.abs(forces)),
@@ -452,14 +541,15 @@ class LeggedRobot(VecEnv):
 
     def _reward_tracking_lin_vel(self):
         error = (
-            np.square(self.commands[:, :2] - self.base_lin_vel[:, :2]).sum(axis=1) + 2 * self.base_lin_vel[:, 2] ** 2
+            np.square(self.commands[:, :2] - self.base_lin_vel[:, :2]).sum(axis=1)
+            + self.cfg.rewards.tracking_z_weight * self.base_lin_vel[:, 2] ** 2
         )
         return np.exp(-error / 0.25)
 
     def _reward_tracking_ang_vel(self):
-        error = np.square(self.commands[:, 2] - self.base_ang_vel[:, 2]) + 0.05 * np.square(
-            self.base_ang_vel[:, :2]
-        ).sum(axis=1)
+        error = np.square(
+            self.commands[:, 2] - self.base_ang_vel[:, 2]
+        ) + self.cfg.rewards.tracking_roll_pitch_weight * np.square(self.base_ang_vel[:, :2]).sum(axis=1)
         return np.exp(-error / 0.5)
 
     def _reward_pose(self):
@@ -475,6 +565,10 @@ class LeggedRobot(VecEnv):
         quat = self.sim.xquat[:, self.sim.reward_body_id]
         gravity = rotate_inverse(quat, np.broadcast_to([0, 0, -1], (self.num_envs, 3)))
         return np.square(gravity[:, :2]).sum(axis=1)
+
+    def _reward_upright(self):
+        # mjlab velocity reward @ 936f7a12: exponential world-up alignment.
+        return np.exp(-self._reward_orientation() / 0.2)
 
     def _reward_body_ang_vel(self):
         velocity = (
@@ -506,7 +600,7 @@ class LeggedRobot(VecEnv):
 
     def _reward_foot_clearance(self):
         return (
-            np.abs(self.feet_pos[:, :, 2] - self.cfg.rewards.feet_clearance_target)
+            np.abs(self.feet_height - self.cfg.rewards.feet_clearance_target)
             * np.linalg.norm(self.feet_vel[:, :, :2], axis=-1)
         ).sum(axis=1) * self._moving()
 

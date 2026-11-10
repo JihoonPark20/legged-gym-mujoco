@@ -2,6 +2,8 @@
 
 [English](README.md) | **한국어**
 
+![MuJoCo 거친 지형 조감도](resources/images/terrain_teaser.png)
+
 **Unitree Go2**와 **G1 (29 DoF)**의 평지 보행을 학습합니다. 물리는 **MuJoCo 3.17.0**으로 CPU에서 실행하며, 학습 장치는 **CUDA → MPS → CPU** 순으로 자동 선택합니다. PPO, SAC, FlashSAC를 지원합니다.
 
 태스크는 [Unitree RL Mjlab](https://github.com/unitreerobotics/unitree_rl_mjlab)을 기반으로 구성했으며, [legged_gym](https://github.com/leggedrobotics/legged_gym)의 프로젝트 구조를 따릅니다.

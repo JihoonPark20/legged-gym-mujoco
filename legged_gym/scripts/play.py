@@ -35,6 +35,8 @@ def summarize_evaluation(trials):
         "settled_fraction": len(settling) / len(trials),
         "mean_settling_time_s": float(np.mean(settling)) if settling else None,
     }
+    if "terrain_boundary" in trials[0]:
+        summary["terrain_boundary_fraction"] = sum(row["terrain_boundary"] for row in trials) / len(trials)
     for axis in ("x", "y", "yaw"):
         summary[f"mae_{axis}"] = (
             sum((row[f"mae_{axis}"] or 0) * row["tracked_steps"] for row in trials) / steps if steps else None
@@ -78,6 +80,7 @@ def evaluate(env, policy, args, cfg):
             settling = np.full(env.num_envs, np.nan)
             tilt = np.zeros(env.num_envs, dtype=bool)
             contact = np.zeros(env.num_envs, dtype=bool)
+            boundary = np.zeros(env.num_envs, dtype=bool)
             failure_stage = [None] * env.num_envs
             for stage, target, count in (("warmup", warmup_command, warmup_steps), ("tracking", command, steps)):
                 env.commands[:] = target
@@ -89,7 +92,8 @@ def evaluate(env, policy, args, cfg):
                     if not active.any():
                         break
                     obs, _, done, _ = env.step(policy(obs.to(args.rl_device)))
-                    if np.any(active & done.numpy() & ~env.terminated_buf):
+                    reached_boundary = active & getattr(env, "_terrain_boundary", False) & ~env.terminated_buf
+                    if np.any(active & done.numpy() & ~env.terminated_buf & ~reached_boundary):
                         raise RuntimeError("Evaluation timed out; its episode horizon must include warmup and tracking")
                     failed = active & env.terminated_buf
                     survival_steps[active] += 1
@@ -107,20 +111,25 @@ def evaluate(env, policy, args, cfg):
                     contact[failed] = env._contact_failure[failed]
                     for index in np.flatnonzero(failed):
                         failure_stage[index] = stage
-                    active[failed] = False  # Never score an auto-reset as recovery.
+                    boundary |= reached_boundary
+                    active[failed | reached_boundary] = False  # Never score an auto-reset as recovery.
             for index in range(env.num_envs):
                 row = {
                     "scenario": name,
                     "seed": int(seed),
                     "env": index,
                     "tracked_steps": int(counts[index]),
-                    "failed": bool(not active[index]),
+                    "failed": failure_stage[index] is not None,
                     "failure_stage": failure_stage[index],
                     "tilt_failure": bool(tilt[index]),
                     "contact_failure": bool(contact[index]),
                     "survival_s": float(survival_steps[index] * env.dt),
                     "settling_time_s": float(settling[index]) if np.isfinite(settling[index]) else None,
                 }
+                if env.terrain.rough:
+                    row["terrain_boundary"] = bool(boundary[index])
+                    row["terrain_level"] = int(env.terrain_levels[index])
+                    row["terrain_type"] = env.cfg.terrain.types[env.terrain_types[index]]
                 for column, axis in enumerate(("x", "y", "yaw")):
                     row[f"mae_{axis}"] = float(absolute[index, column] / counts[index]) if counts[index] else None
                     row[f"rmse_{axis}"] = (
@@ -171,9 +180,9 @@ def evaluate(env, policy, args, cfg):
         "contract": policy_contract(env),
         "env_config": class_to_dict(env.cfg),
         "metric_definitions": {
-            "tracking": "Sample-weighted MAE/RMSE after warmup, through first failure; X/Y in m/s, yaw in rad/s.",
+            "tracking": "Sample-weighted MAE/RMSE after warmup, until failure, terrain boundary or trial end; X/Y in m/s, yaw in rad/s.",
             "failure": "First task termination (tilt or illegal contact), including warmup. Auto-reset samples excluded.",
-            "survival": "Time observed before first failure or end of trial, including warmup; bounded by trial duration.",
+            "survival": "Time observed until failure, terrain boundary or trial end, including warmup; bounded by trial duration.",
             "settling": "First continuous all-axis tolerance window; time from command change. Null if not reached.",
             "mean_settling_time_s": "Mean among responders only; always interpret alongside settled_fraction and failure_rate.",
         },
@@ -206,6 +215,7 @@ def play(args):
     env_cfg.domain_rand.randomize_friction = False
     env_cfg.domain_rand.push_robots = False
     env_cfg.commands.curriculum = False
+    env_cfg.terrain.curriculum = False
     env_cfg.domain_rand.randomize_encoder_bias = False
     env_cfg.domain_rand.randomize_com = False
     env_cfg.commands.ranges = env_cfg.commands.limit_ranges

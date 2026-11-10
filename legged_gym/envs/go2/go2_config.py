@@ -1,6 +1,6 @@
 """Unitree RL Mjlab Go2 Flat @ 1425b15f, mjlab 1.2.0 reference settings."""
 
-from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
+from legged_gym.envs.base.legged_robot_config import ROUGH_REWARD_SCALES, LeggedRobotCfg, LeggedRobotCfgPPO
 
 
 class Go2Cfg(LeggedRobotCfg):
@@ -42,3 +42,22 @@ class Go2Cfg(LeggedRobotCfg):
 class Go2CfgPPO(LeggedRobotCfgPPO):
     class runner(LeggedRobotCfgPPO.runner):
         experiment_name = "go2"
+
+
+class Go2RoughCfg(Go2Cfg):
+    class env(Go2Cfg.env):
+        num_envs = 64
+
+    class terrain(Go2Cfg.terrain):
+        mesh_type = "heightfield"
+        measure_heights = True
+
+    class rewards(Go2Cfg.rewards):
+        scales = {**Go2Cfg.rewards.scales, **ROUGH_REWARD_SCALES}
+        tracking_z_weight = 1.0
+        tracking_roll_pitch_weight = 1.0
+
+
+class Go2RoughCfgPPO(Go2CfgPPO):
+    class runner(Go2CfgPPO.runner):
+        experiment_name = "go2_rough"

@@ -2,6 +2,23 @@
 
 from .base_config import BaseConfig
 
+# Rough velocity weights adapted from mujocolab/mjlab @ 936f7a12 (Apache-2.0).
+# Retain this environment's termination and robot-specific collision penalties.
+ROUGH_REWARD_SCALES = {
+    "tracking_lin_vel": 2.0,
+    "tracking_ang_vel": 2.0,
+    "orientation": 0.0,
+    "upright": 1.0,
+    "dof_acc": 0.0,
+    "dof_pos_limits": -1.0,
+    "action_rate": -0.1,
+    "foot_gait": 0.0,
+    "foot_clearance": -2.0,
+    "foot_slip": -0.1,
+    "soft_landing": -1e-5,
+    "stand_still": 0.0,
+}
+
 
 class LeggedRobotCfg(BaseConfig):
     seed = 42
@@ -21,6 +38,28 @@ class LeggedRobotCfg(BaseConfig):
         tolerance = 1e-08
         ls_tolerance = 0.01
         ccd_iterations = 50
+
+    class terrain:
+        mesh_type = "plane"  # Rough tasks use one immutable, shared MuJoCo heightfield.
+        seed = 42
+        terrain_length = 6.0
+        horizontal_scale = 0.1
+        border_size = 1.0
+        num_rows = 5  # Difficulty levels; columns are terrain types.
+        types = ["slope", "slope_down", "stairs", "stairs_down", "noise", "obstacles"]
+        max_init_terrain_level = 1
+        curriculum = True
+        platform_size = 2.0
+        max_slope = 0.3
+        max_step_height = 0.12
+        step_width = 0.4
+        max_noise_height = 0.06
+        max_obstacle_height = 0.12
+        measure_heights = False
+        measured_points_x = [i * 0.1 for i in range(-8, 9)]
+        measured_points_y = [i * 0.1 for i in range(-5, 6)]
+        height_clip = 1.0
+        height_noise = 0.05
 
     class control:
         decimation = 4
@@ -64,6 +103,8 @@ class LeggedRobotCfg(BaseConfig):
         push_velocity_ranges = [[-0.5, 0.5], [-0.5, 0.5], [-0.4, 0.4], [-0.52, 0.52], [-0.52, 0.52], [-0.78, 0.78]]
 
     class rewards:
+        tracking_z_weight = 2.0
+        tracking_roll_pitch_weight = 0.05
         soft_dof_pos_limit = 0.9
         contact_history_length = 4
         gait_period = 0.6

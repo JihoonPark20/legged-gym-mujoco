@@ -15,6 +15,8 @@ from mujoco import batch
 
 from legged_gym import LEGGED_GYM_RESOURCES_DIR
 
+from .terrain import Terrain
+
 
 def joint_parameters(names, patterns, default=None):
     """Resolve regex settings in insertion order; more specific entries come last."""
@@ -33,7 +35,8 @@ def foot_geom_names(cfg):
     return getattr(cfg.asset, "foot_geoms", [f"{name}_foot_collision" for name in cfg.asset.foot_sites])
 
 
-def load_model(cfg):
+def load_model(cfg, terrain=None):
+    terrain = Terrain(cfg.terrain) if terrain is None else terrain
     path = Path(LEGGED_GYM_RESOURCES_DIR) / "robots" / cfg.asset.file
     root = ET.parse(path).getroot()
     compiler = root.find("compiler")
@@ -55,16 +58,7 @@ def load_model(cfg):
         gravity="0 0 -9.81",
     )
     world = root.find("worldbody")
-    ET.SubElement(
-        world,
-        "geom",
-        name="floor",
-        type="plane",
-        size="0 0 0.1",
-        friction="1 0.005 0.0001",
-        rgba="0.25 0.3 0.35 1",
-        condim="3",
-    )
+    terrain.add_to_xml(root)
     ET.SubElement(world, "light", name="task_light", pos="0 0 4", dir="0 0 -1", directional="true")
     bodies = {body.get("name"): body for body in world.iter("body")}
     bodies[cfg.asset.root_body].set("pos", " ".join(map(str, cfg.init_state.pos)))
@@ -151,6 +145,7 @@ def load_model(cfg):
             num="1",
         )
     model = mujoco.MjModel.from_xml_string(ET.tostring(root, encoding="unicode"))
+    terrain.install(model)
     return model
 
 
@@ -163,7 +158,8 @@ class MujocoBatch:
         for mesh in source.findall("asset/mesh"):
             digest.update((meshdir / mesh.get("file")).read_bytes())
         self.asset_digest = digest.hexdigest()
-        self.model = load_model(cfg)
+        self.terrain = Terrain(cfg.terrain)
+        self.model = load_model(cfg, self.terrain)
         self.batch = batch.Batch(
             self.model, nsim=cfg.env.num_envs, nthread=cfg.sim.nthread, persistent=cfg.sim.persistent
         )

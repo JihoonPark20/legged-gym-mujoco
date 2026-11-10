@@ -59,6 +59,8 @@ class TaskRegistry:
                 snapshot = json.loads(snapshot_path.read_text())
                 if snapshot["env"]["asset"]["file"] != env_cfg.asset.file:
                     raise ValueError("Checkpoint snapshot belongs to a different robot/configuration")
+                if snapshot["env"].get("terrain", {}).get("mesh_type", "plane") != env_cfg.terrain.mesh_type:
+                    raise ValueError("Checkpoint terrain differs; select the matching flat or rough task")
                 update_class_from_dict(env_cfg, snapshot["env"], strict=False)
                 update_class_from_dict(train_cfg, snapshot["train"], strict=False)
                 # Resolve legacy schedules using the original run length, before

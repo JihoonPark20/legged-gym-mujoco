@@ -47,6 +47,13 @@ def policy_contract(env):
             key: getattr(env.cfg.asset, key)
             for key in ("self_collisions", "foot_contact_bodies", "foot_geoms", "foot_solimp", "reward_body")
         }
+    if env.cfg.terrain.mesh_type != "plane":
+        # Preserve legacy flat contracts; rough scans and geometry must match.
+        contract["terrain"] = {
+            key: value
+            for key, value in class_to_dict(env.cfg.terrain).items()
+            if key not in ("curriculum", "max_init_terrain_level")
+        }
     return contract
 
 
@@ -401,7 +408,11 @@ class AgentCheckpointMixin:
             raise ValueError("Checkpoint rsl-rl model API differs; use the backend that saved it")
         if "agent_spec" in state and state["agent_spec"] != self.agent_spec:
             raise ValueError("Checkpoint agent definition does not match the configured agent")
-        if any(state.get("contract", {}).get(key) != value for key, value in policy_contract(self.env).items()):
+        expected_contract = policy_contract(self.env)
+        saved_contract = state.get("contract", {})
+        if saved_contract.get("terrain") != expected_contract.get("terrain") or any(
+            saved_contract.get(key) != value for key, value in expected_contract.items()
+        ):
             raise ValueError("Checkpoint policy contract does not match this robot/configuration")
         if self.agent_spec.get("action_transform") in ("joint_limits", "normalized_joint_limits"):
             if state.get("action_bounds") != [value.tolist() for value in action_bounds(self.env)]:

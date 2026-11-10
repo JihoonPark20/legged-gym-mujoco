@@ -2,6 +2,8 @@
 
 **English** | [한국어](README.ko.md)
 
+![MuJoCo rough terrain overview](resources/images/terrain_teaser.png)
+
 Train **Unitree Go2** and **G1 (29 DoF)** to walk on flat ground. Physics runs on the CPU with **MuJoCo 3.17.0**; the learner device is selected automatically in this order: **CUDA → MPS → CPU**. PPO, SAC, and FlashSAC are supported.
 
 Tasks are based on [Unitree RL Mjlab](https://github.com/unitreerobotics/unitree_rl_mjlab), following the [legged_gym](https://github.com/leggedrobotics/legged_gym) project structure.

@@ -4,7 +4,7 @@ Motor specifications and posture tolerances follow the pinned Apache-2.0 source.
 See resources/robots/g1/unitree_mjlab.json and licenses/unitree_rl_mjlab_LICENSE.
 """
 
-from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
+from legged_gym.envs.base.legged_robot_config import ROUGH_REWARD_SCALES, LeggedRobotCfg, LeggedRobotCfgPPO
 
 
 def _reflected_inertia(rotors, gears):
@@ -122,3 +122,24 @@ class G1Cfg(LeggedRobotCfg):
 class G1CfgPPO(LeggedRobotCfgPPO):
     class runner(LeggedRobotCfgPPO.runner):
         experiment_name = "g1"
+
+
+class G1RoughCfg(G1Cfg):
+    class env(G1Cfg.env):
+        num_envs = 64
+
+    class terrain(G1Cfg.terrain):
+        mesh_type = "heightfield"
+        measure_heights = True
+        max_init_terrain_level = 0
+        max_slope = 0.25
+
+    class rewards(G1Cfg.rewards):
+        scales = {**G1Cfg.rewards.scales, **ROUGH_REWARD_SCALES, "angular_momentum": -0.02}
+        tracking_z_weight = 1.0
+        tracking_roll_pitch_weight = 1.0
+
+
+class G1RoughCfgPPO(G1CfgPPO):
+    class runner(G1CfgPPO.runner):
+        experiment_name = "g1_rough"

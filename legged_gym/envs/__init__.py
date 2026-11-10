@@ -31,8 +31,10 @@
 from legged_gym.utils.task_registry import task_registry
 
 from .base.legged_robot import LeggedRobot
-from .g1.g1_config import G1Cfg, G1CfgPPO
-from .go2.go2_config import Go2Cfg, Go2CfgPPO
+from .g1.g1_config import G1Cfg, G1CfgPPO, G1RoughCfg, G1RoughCfgPPO
+from .go2.go2_config import Go2Cfg, Go2CfgPPO, Go2RoughCfg, Go2RoughCfgPPO
 
 task_registry.register("go2", LeggedRobot, Go2Cfg(), Go2CfgPPO())
 task_registry.register("g1", LeggedRobot, G1Cfg(), G1CfgPPO())
+task_registry.register("go2_rough", LeggedRobot, Go2RoughCfg(), Go2RoughCfgPPO())
+task_registry.register("g1_rough", LeggedRobot, G1RoughCfg(), G1RoughCfgPPO())

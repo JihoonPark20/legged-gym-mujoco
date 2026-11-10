@@ -135,7 +135,7 @@ def get_args(argv=None, *, default_rl_device="auto", playback=False):
     parser.add_argument(
         "--task",
         default="go2",
-        choices=["go2", "g1"],
+        choices=["go2", "g1", "go2_rough", "g1_rough"],
         help="Locomotion task (default: go2)",
     )
     parser.add_argument(
